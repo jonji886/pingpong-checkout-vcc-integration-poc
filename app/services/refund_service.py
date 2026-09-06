@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal
-from datetime import timedelta
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..domain.payment import RefundStatus, transition_refund
+from ..domain.payment import transition_refund
 from ..integrations.pingpong.base import CheckoutProvider, ProviderError, ProviderRefundResult
 from ..integrations.pingpong.retry import RetryPolicy
-from ..models import ApiIdempotency, PaymentOrder, RefundOrder, CreditHold
+from ..models import ApiIdempotency, CreditHold, PaymentOrder, RefundOrder
 from .common import find_idempotency, hash_key, new_id, payload_hash, utcnow, write_audit, write_provider_log
 from .credit_service import CreditService
 from .payment_service import ConflictError, NotFoundError
@@ -57,8 +56,14 @@ class RefundService:
         except IntegrityError:
             db.rollback()
             existing = find_idempotency(db, actor_id=actor_id, method="POST", route=route, key=idem_key)
-            if existing and existing.request_hash != req_hash: raise ConflictError("idempotency key payload conflict")
-            return db.get(RefundOrder, existing.resource_id)
+            if existing is None:
+                raise ConflictError("idempotency race could not be resolved")
+            if existing.request_hash != req_hash:
+                raise ConflictError("idempotency key payload conflict")
+            resolved = db.get(RefundOrder, existing.resource_id)
+            if resolved is None:
+                raise NotFoundError("idempotent refund missing")
+            return resolved
         started = time.monotonic()
         try:
             result = self.retry_policy.run(lambda: self.provider.create_refund(partner_refund_id=partner_refund_id, provider_request_id=provider_request_id, partner_transaction_id=payment.partner_transaction_id, amount=Decimal(payment.amount), currency=payment.currency), operation_name="create_refund", request_id=provider_request_id)

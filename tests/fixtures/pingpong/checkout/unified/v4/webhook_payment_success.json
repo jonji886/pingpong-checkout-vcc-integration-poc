@@ -1,0 +1,17 @@
+{
+  "requestId": "req-unified-001",
+  "transaction_id": "2026090650000001",
+  "partner_transaction_id": "txn-unified-001",
+  "amount": "100.00",
+  "currency": "USD",
+  "status": "SUCCESS",
+  "result_code": "000000",
+  "result_message": "Transaction succeeded",
+  "payment_method": {
+    "type": "CARD",
+    "card_info": {
+      "first_six_digits": "444433",
+      "last_four_digits": "1111"
+    }
+  }
+}

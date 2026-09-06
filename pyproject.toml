@@ -2,19 +2,37 @@
 name = "pingpong-ai-fde-poc"
 version = "0.1.0"
 description = "DemoAI payment and VCC integration POC"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.110",
   "uvicorn>=0.29",
   "sqlalchemy>=2.0",
   "pydantic>=2.0",
   "httpx>=0.24",
+  "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "pytest-asyncio>=0.23"]
+test = ["pytest>=8", "pytest-asyncio>=0.23", "coverage>=7"]
+dev = ["ruff>=0.6", "mypy>=1.11"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 markers = ["e2e: black-box HTTP acceptance tests using the deterministic Mock Provider"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 140
+exclude = [".venv", "build", "pingpong_ai_fde_poc.egg-info"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501", "E701", "E702"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "skip"
+check_untyped_defs = true
+warn_unused_ignores = false

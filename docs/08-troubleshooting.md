@@ -51,10 +51,10 @@ flowchart TD
 
 - 症状：callback 返回 401。
 - 需要客户提供：时间、`trace_id`（若有）、Provider account/site，不提供签名值或原始 body。
-- 检查点：Mock 是否使用 `X-Mock-Signature`；Sandbox 是否按当前 V4 body envelope/full-message signature；salt、`signType`、`bizContent` 原文是否一致。
-- 常见根因：验签原文被 JSON 解析/重序列化、错误 salt、把 Mock HMAC 用到 Sandbox。
+- 检查点：Mock 是否使用 `X-Mock-Signature`；Sandbox 是否注入了账户级 `PingPongWebhookVerifier`，并保留原始 body 和 headers。
+- 常见根因：未配置当前 webhook verifier、将旧版 body envelope verifier 用到 current flat webhook、把 Mock HMAC 用到 Sandbox。
 - 恢复动作：保留 raw body 只在请求内存中核对；使用脱敏字段重现 contract test；修复配置后重放由 Provider 发起的通知。
-- 升级条件：官方样例按当前文档仍无法验证，标记 Sandbox Pending，不猜算法。
+- 升级条件：账户级验签材料或官方样例仍未确认，标记 Sandbox Pending，不猜算法。
 
 ## 5. 重复 Webhook
 
@@ -113,8 +113,9 @@ flowchart TD
 ## 11. 如何使用 `/ui/fde`
 
 - 症状：需要快速判断 POC 当前证据链。
-- 需要客户提供：无需敏感信息；输入 `payment_id` 即可。
-- 检查点：Provider Calls（operation/status/trace）、Webhook Events（status/fingerprint）、Audit Log、Reconciliation。
+- 需要客户提供：无需敏感信息；输入 `Payment ID`、`Application ID` 或完整 `Trace ID` 即可。
+- 检查点：页面会按 `API Request → Provider Call → Provider Response → Webhook → State Transition → Ledger / Audit` 展示安全关联元数据，并允许复制完整 Trace ID。
+- 保护边界：原始 Provider Request/Response Body、签名 Header 和敏感字段不持久化；页面只展示 Provider Request ID、HTTP 结果、错误、Audit 和 latency。
 - 常见误区：把 UI 的 Mock 操作当作 Sandbox E2E；把 `delivery_fingerprint` 当成 Provider event ID。
 - 恢复动作：从 UI 复制 correlation IDs，再用 API Query；本地演示可使用 `scripts/reconcile_due.py`。
 - 升级条件：UI 与数据库/API 展示不一致，或涉及真实账户。

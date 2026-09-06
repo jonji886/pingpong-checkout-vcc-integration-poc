@@ -1,0 +1,19 @@
+{
+  "code": "SUCCESS",
+  "data": {
+    "total_num": 1,
+    "list": [
+      {
+        "authorization_id": "auth202609060001",
+        "card_id": "card202609060001",
+        "card_number": "532911***2321",
+        "merchant_name": "AWS",
+        "transaction_amount": "20.00",
+        "transaction_currency": "USD",
+        "billing_amount": "20.00",
+        "billing_currency": "USD",
+        "authorization_status": "APPROVED"
+      }
+    ]
+  }
+}

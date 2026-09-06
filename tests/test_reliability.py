@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 import pytest
@@ -12,6 +13,7 @@ from app.integrations.pingpong.mock_checkout import MockPingPongCheckoutAdapter
 from app.main import create_app
 from app.models import CreditLedger, WebhookEvent
 from app.observability.redaction import redact
+from app.services.payment_service import PaymentService
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +47,17 @@ class TimeoutThenQueryProvider(MockPingPongCheckoutAdapter):
         self.query_arguments.append(kwargs)
         return ProviderPaymentResult(
             provider_transaction_id="provider_recovered_1",
+            provider_request_id=kwargs["provider_request_id"],
+            provider_status="SUCCESS",
+            next_action=NextAction("NONE"),
+            http_status=200,
+        )
+
+
+class SuccessQueryProvider(MockPingPongCheckoutAdapter):
+    def query_payment(self, **kwargs):
+        return ProviderPaymentResult(
+            provider_transaction_id="provider-query-success-1",
             provider_request_id=kwargs["provider_request_id"],
             provider_status="SUCCESS",
             next_action=NextAction("NONE"),
@@ -138,3 +151,92 @@ def test_canonical_delivery_fingerprint_handles_reordered_duplicate_payload():
 
 def test_sensitive_redaction_includes_provider_action_and_auth_fields():
     assert redact({"paymentUrl": "https://provider.invalid/token=secret", "Authorization": "Bearer secret", "ok": 1}) == {"paymentUrl": "[REDACTED]", "Authorization": "[REDACTED]", "ok": 1}
+
+
+def test_concurrent_success_observations_have_one_credit_effect():
+    client = TestClient(create_app(provider=MockPingPongCheckoutAdapter("PENDING")))
+    payment_id = topup(client, "concurrent-observation")
+    result = ProviderPaymentResult(
+        provider_transaction_id="provider-concurrent-1",
+        provider_request_id="request-concurrent-1",
+        provider_status="SUCCESS",
+        next_action=NextAction("NONE"),
+    )
+    service = PaymentService(MockPingPongCheckoutAdapter("PENDING"))
+
+    def observe(index: int):
+        db = SessionLocal()
+        try:
+            service.apply_observation(db, payment_id=payment_id, result=result, trace_id="concurrent-" + str(index), source="test")
+            db.commit()
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(observe, (1, 2)))
+
+    db = SessionLocal()
+    try:
+        assert db.query(CreditLedger).filter_by(entry_type="TOPUP", reference_id=payment_id).count() == 1
+        assert db.query(CreditLedger).filter_by(entry_type="TOPUP", reference_id=payment_id).one().credit_amount == Decimal("100.00")
+    finally:
+        db.close()
+
+
+def _assert_one_topup_ledger(payment_id: str) -> None:
+    db = SessionLocal()
+    try:
+        assert db.query(CreditLedger).filter_by(entry_type="TOPUP", reference_id=payment_id).count() == 1
+    finally:
+        db.close()
+
+
+def test_concurrent_webhooks_have_one_credit_effect():
+    client = TestClient(create_app(provider=MockPingPongCheckoutAdapter("PENDING")))
+    payment_id = topup(client, "concurrent-webhooks")
+    body, headers = signed({"partner_transaction_id": "txn_" + payment_id, "status": "SUCCESS", "amount": "100.00", "currency": "USD"})
+
+    def deliver(index: int):
+        request_headers = {**headers, "X-Trace-Id": "webhook-" + str(index)}
+        return client.post("/api/webhooks/pingpong/checkout", content=body, headers=request_headers)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(deliver, (1, 2)))
+    assert all(response.status_code == 200 for response in responses)
+    _assert_one_topup_ledger(payment_id)
+
+
+def test_concurrent_webhook_and_query_have_one_credit_effect():
+    client = TestClient(create_app(provider=SuccessQueryProvider("PENDING")))
+    payment_id = topup(client, "concurrent-webhook-query")
+    body, webhook_headers = signed({"partner_transaction_id": "txn_" + payment_id, "status": "SUCCESS", "amount": "100.00", "currency": "USD"})
+
+    def deliver_webhook():
+        return client.post("/api/webhooks/pingpong/checkout", content=body, headers=webhook_headers)
+
+    def query_payment():
+        return client.post("/api/payments/" + payment_id + "/query", headers={"Authorization": "Bearer dev-token"})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        webhook_response, query_response = pool.map(lambda fn: fn(), (deliver_webhook, query_payment))
+    assert webhook_response.status_code == 200
+    assert query_response.status_code == 200
+    _assert_one_topup_ledger(payment_id)
+
+
+def test_concurrent_webhook_and_reconciliation_have_one_credit_effect():
+    client = TestClient(create_app(provider=SuccessQueryProvider("PENDING")))
+    payment_id = topup(client, "concurrent-webhook-reconcile")
+    body, webhook_headers = signed({"partner_transaction_id": "txn_" + payment_id, "status": "SUCCESS", "amount": "100.00", "currency": "USD"})
+
+    def deliver_webhook():
+        return client.post("/api/webhooks/pingpong/checkout", content=body, headers=webhook_headers)
+
+    def reconcile_payment():
+        return client.post("/api/admin/payments/" + payment_id + "/reconcile", headers={"Authorization": "Bearer admin-token"})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        webhook_response, reconcile_response = pool.map(lambda fn: fn(), (deliver_webhook, reconcile_payment))
+    assert webhook_response.status_code == 200
+    assert reconcile_response.status_code == 200
+    _assert_one_topup_ledger(payment_id)

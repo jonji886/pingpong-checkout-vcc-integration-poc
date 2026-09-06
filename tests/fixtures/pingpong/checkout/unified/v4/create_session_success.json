@@ -1,0 +1,18 @@
+{
+  "code": "SUCCESS",
+  "message": "",
+  "data": {
+    "request_id": "req-unified-001",
+    "partner_transaction_id": "txn-unified-001",
+    "transaction_id": "2026090650000001",
+    "session_token": "sandbox-session-token",
+    "amount": "100.00",
+    "currency": "USD",
+    "action": {
+      "redirect_url": "https://pay.pingpongx.com/checkout/session-001",
+      "js_sdk_url": "https://pay.pingpongx.com/sdk.js"
+    },
+    "result_code": "success",
+    "result_message": "Transaction succeeded"
+  }
+}

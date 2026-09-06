@@ -10,9 +10,8 @@ from app.config import Settings
 from app.integrations.pingpong.auth import PingPongAuthProvider
 from app.integrations.pingpong.base import ProviderContractError, ProviderRateLimited, ProviderTimeout
 from app.integrations.pingpong.checkout import PingPongSandboxCheckoutAdapter
-from app.integrations.pingpong.mappers import map_payment_response, map_refund_response, map_webhook
+from app.integrations.pingpong.mappers import map_payment_response, map_webhook
 from app.integrations.pingpong.retry import NoOpSleeper, RetryPolicy
-
 
 FIXTURES = Path(__file__).parent / "fixtures" / "pingpong" / "checkout" / "v4"
 
@@ -153,6 +152,23 @@ def test_sandbox_settings_require_real_https_endpoints_without_secrets_in_error(
     with pytest.raises(RuntimeError, match="PINGPONG_PAY_RESULT_URL") as error:
         replace(valid, pingpong_pay_result_url="https://example.invalid/result").validate()
     assert "salt-demo" not in str(error.value)
+
+
+def test_unified_sandbox_settings_do_not_require_legacy_credentials():
+    valid = Settings(
+        pingpong_mode="sandbox",
+        pingpong_base_url="https://gateway.pingpongx.com",
+        pingpong_access_token="access-demo",
+        pingpong_sign_version="v1",
+        pingpong_notify_url="https://callback.demoai.dev/notify",
+        pingpong_pay_result_url="https://callback.demoai.dev/result",
+        pingpong_pay_cancel_url="https://callback.demoai.dev/cancel",
+        pingpong_issuing_card_product_code="T1FBXO",
+    )
+    valid.validate_unified()
+
+    with pytest.raises(RuntimeError, match="PINGPONG_ISSUING_CARD_PRODUCT_CODE"):
+        replace(valid, pingpong_issuing_card_product_code="").validate_unified()
 
 
 def test_retry_policy_is_bounded_without_real_sleep():

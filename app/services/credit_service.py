@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -40,19 +41,27 @@ class CreditService:
         account = cls.ensure_account(db, user_id)
         key = "TOPUP:" + payment_id
         if db.query(CreditLedger).filter_by(idempotency_key=key).first():
-            cls.refresh_available(db, account)
             return False
         entry = CreditLedger(id=new_id("ledger"), account_id=account.id, entry_type="TOPUP", credit_amount=amount, fiat_amount=amount, fiat_currency="USD", pricing_rule_version="P0_USD_1_TO_1", reference_type="PAYMENT", reference_id=payment_id, idempotency_key=key)
         try:
             with db.begin_nested():
                 db.add(entry)
                 db.flush()
-                account.posted_balance = Decimal(account.posted_balance) + amount
-                cls.refresh_available(db, account)
+                # The unique ledger row is the effect guard. Update the
+                # balance atomically so concurrent observations cannot write
+                # back a stale Python-side balance.
+                db.execute(
+                    update(CreditAccount)
+                    .where(CreditAccount.id == account.id)
+                    .values(posted_balance=CreditAccount.posted_balance + amount, updated_at=utcnow())
+                )
+            db.expire(account)
+            account = db.query(CreditAccount).filter_by(id=account.id).populate_existing().one()
+            cls.refresh_available(db, account)
             return True
         except IntegrityError:
-            account = db.query(CreditAccount).filter_by(user_id=user_id).one()
-            cls.refresh_available(db, account)
+            # A duplicate effect must not dirty the account with a stale
+            # balance. The committed winner is the source of truth.
             return False
 
     @classmethod
@@ -77,11 +86,17 @@ class CreditService:
                 with db.begin_nested():
                     db.add(CreditLedger(id=new_id("ledger"), account_id=account.id, entry_type="REFUND_REVERSAL", credit_amount=-amount, fiat_amount=amount, fiat_currency="USD", pricing_rule_version="P0_USD_1_TO_1", reference_type="REFUND", reference_id=refund_id, idempotency_key="REFUND_REVERSAL:" + refund_id))
                     db.flush()
-                    account.posted_balance = Decimal(account.posted_balance) - amount
+                    db.execute(
+                        update(CreditAccount)
+                        .where(CreditAccount.id == account.id)
+                        .values(posted_balance=CreditAccount.posted_balance - amount, updated_at=utcnow())
+                    )
             except IntegrityError:
                 pass
         hold.status = "SETTLED"
         hold.settled_at = utcnow()
+        db.expire(account)
+        account = db.query(CreditAccount).filter_by(id=hold.account_id).populate_existing().one()
         cls.refresh_available(db, account)
 
     @classmethod

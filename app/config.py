@@ -41,6 +41,11 @@ class Settings:
     pingpong_app_id: str = os.getenv("PINGPONG_APP_ID", "")
     pingpong_app_secret: str = os.getenv("PINGPONG_APP_SECRET", "")
     pingpong_api_token: str = os.getenv("PINGPONG_API_TOKEN", "")
+    # Current unified API credentials. Legacy Checkout V4 envelope settings
+    # above remain only for the explicitly documented legacy adapter.
+    pingpong_access_token: str = os.getenv("PINGPONG_ACCESS_TOKEN", "")
+    pingpong_sign_version: str = os.getenv("PINGPONG_SIGN_VERSION", "v1")
+    pingpong_on_behalf_of: str = os.getenv("PINGPONG_ON_BEHALF_OF", "")
     pingpong_webhook_secret: str = os.getenv("PINGPONG_WEBHOOK_SECRET", "")
     pingpong_notify_url: str = os.getenv("PINGPONG_NOTIFY_URL", "")
     pingpong_pay_result_url: str = os.getenv("PINGPONG_PAY_RESULT_URL", "")
@@ -49,6 +54,7 @@ class Settings:
     pingpong_shopper_ip: str = os.getenv("PINGPONG_SHOPPER_IP", "")
     pingpong_payment_method_type: str = os.getenv("PINGPONG_PAYMENT_METHOD_TYPE", "scheme")
     pingpong_order_terminal: str = os.getenv("PINGPONG_ORDER_TERMINAL", "01")
+    pingpong_issuing_card_product_code: str = os.getenv("PINGPONG_ISSUING_CARD_PRODUCT_CODE", "")
     llm_enabled: bool = _env_bool("LLM_ENABLED", False)
     llm_provider: str = os.getenv("LLM_PROVIDER", "deepseek").lower()
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -97,6 +103,30 @@ class Settings:
             ]
             if invalid_urls:
                 raise RuntimeError("Sandbox URL must be a complete HTTPS URL: " + ", ".join(invalid_urls))
+
+    def validate_unified(self) -> None:
+        """Validate the current unified API boundary without guessing a signer."""
+        if self.pingpong_mode != "sandbox":
+            return
+        missing = [
+            name
+            for name, value in {
+                "PINGPONG_BASE_URL": self.pingpong_base_url,
+                "PINGPONG_ACCESS_TOKEN": self.pingpong_access_token or self.pingpong_api_token,
+                "PINGPONG_SIGN_VERSION": self.pingpong_sign_version,
+                "PINGPONG_NOTIFY_URL": self.pingpong_notify_url,
+                "PINGPONG_PAY_RESULT_URL": self.pingpong_pay_result_url,
+                "PINGPONG_PAY_CANCEL_URL": self.pingpong_pay_cancel_url,
+                "PINGPONG_ISSUING_CARD_PRODUCT_CODE": self.pingpong_issuing_card_product_code,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise RuntimeError("Unified Sandbox configuration missing: " + ", ".join(missing))
+        if not _is_https_url(self.pingpong_base_url):
+            raise RuntimeError("PINGPONG_BASE_URL must be a complete HTTPS URL")
+        if not all(_is_https_url(value) for value in (self.pingpong_notify_url, self.pingpong_pay_result_url, self.pingpong_pay_cancel_url)):
+            raise RuntimeError("Unified Sandbox callback URLs must be complete HTTPS URLs")
         if self.llm_enabled:
             if self.llm_provider != "deepseek":
                 raise RuntimeError("LLM_PROVIDER must be deepseek when LLM_ENABLED=true")

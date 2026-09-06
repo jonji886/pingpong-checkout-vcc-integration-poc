@@ -1,0 +1,15 @@
+{
+  "code": "SUCCESS",
+  "message": "",
+  "data": {
+    "request_id": "req-refund-001",
+    "partner_transaction_id": "txn-unified-001",
+    "partner_refund_id": "rfn-unified-001",
+    "refund_id": "2026090650000002",
+    "amount": "100.00",
+    "currency": "USD",
+    "status": "SUCCESS",
+    "result_code": "success",
+    "result_message": "Transaction succeeded"
+  }
+}

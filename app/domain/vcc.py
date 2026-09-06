@@ -5,7 +5,6 @@ from decimal import Decimal
 from enum import Enum
 from typing import Optional
 
-
 CLOUD_MONTHLY_BUDGET = Decimal("50000.00")
 CLOUD_MONTHLY_USED = Decimal("10000.00")
 

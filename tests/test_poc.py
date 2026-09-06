@@ -6,15 +6,17 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import Base, engine, SessionLocal
-from app.domain.payment import PaymentStatus, transition
-from app.integrations.pingpong.mock_checkout import MockPingPongCheckoutAdapter
-from app.integrations.pingpong.base import ProviderRateLimited
-from app.integrations.pingpong.retry import RetryPolicy
+from app.db import Base, SessionLocal, engine
+from app.domain.payment import transition
 from app.integrations.pingpong.auth import PingPongAuthProvider
-from app.observability.redaction import redact
+from app.integrations.pingpong.base import ProviderRateLimited
+from app.integrations.pingpong.mock_checkout import MockPingPongCheckoutAdapter
+from app.integrations.pingpong.mock_issuing import MockPingPongIssuingAdapter
+from app.integrations.pingpong.retry import RetryPolicy
 from app.main import create_app
-from app.models import CreditLedger, PaymentOrder, CreditAccount
+from app.models import CreditAccount, VCCApplication
+from app.observability.redaction import redact
+from app.services.issuing_service import IssuingService
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +113,38 @@ def test_vcc_requires_human_approval_and_budget_gate(client):
     assert client.post("/api/vcc/%s/card" % application_id, headers=finance).json()["status"] == "ACTIVE"
     rejected = client.post("/api/vcc/agent", json={"message": "为 AWS 账单申请一张 60000 USD 虚拟卡"}, headers=finance).json()
     assert rejected["status"] == "REJECTED_BUDGET"
+
+
+def test_vcc_issuance_rejects_missing_human_confirmation(client):
+    finance = {"Authorization": "Bearer finance-token"}
+    parsed = client.post(
+        "/api/vcc/agent",
+        json={"message": "为 AWS 9 月账单申请一张 20000 USD 的虚拟卡，有效期 30 天"},
+        headers=finance,
+    ).json()
+    application_id = parsed["application_id"]
+    approved = client.post(
+        "/api/vcc/%s/approve" % application_id,
+        json={"approved": True},
+        headers={"Authorization": "Bearer approver-token"},
+    )
+    assert approved.status_code == 200
+
+    db = SessionLocal()
+    try:
+        service = IssuingService(MockPingPongIssuingAdapter())
+        with pytest.raises(PermissionError, match="human confirmation"):
+            service.create_vcc(
+                db,
+                application_id=application_id,
+                actor_id="demo_finance",
+                actor_role="finance",
+                trace_id="trace-human-gate",
+            )
+        db.rollback()
+        assert db.get(VCCApplication, application_id).status == "APPROVED"
+    finally:
+        db.close()
 
 
 def test_redactor_removes_sensitive_fields():

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 SENSITIVE_KEY_PARTS = ("secret", "token", "authorization", "sign", "cvv", "pan", "card_number", "first_name", "last_name", "email", "phone", "ip", "paymenturl", "payment_url", "qr_payload")
 
 

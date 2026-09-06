@@ -4,14 +4,15 @@ import os
 from decimal import Decimal
 from typing import Dict
 
-from .base import CheckoutProvider, NextAction, ProviderPaymentResult, ProviderRefundResult, ProviderRateLimited, ProviderTimeout
+from .base import NextAction, ProviderPaymentResult, ProviderRateLimited, ProviderRefundResult, ProviderTimeout
 
 
 class MockPingPongCheckoutAdapter:
     """Deterministic adapter used for local demo/tests; no claim of Sandbox verification."""
 
     def __init__(self, status: str | None = None):
-        self.status = (status or os.getenv("MOCK_PAYMENT_STATUS", "PENDING")).upper()
+        raw_status = status if status is not None else (os.getenv("MOCK_PAYMENT_STATUS") or "PENDING")
+        self.status = raw_status.upper()
         self.payments: Dict[str, ProviderPaymentResult] = {}
         self.refunds: Dict[str, ProviderRefundResult] = {}
         self.create_calls = 0

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -12,21 +10,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..agents.finance_agent import RuleBasedIntentParser, VCCIntentParser, is_unsafe_request, unsafe_request
+from ..agents.schemas import PaymentRequest
 from ..agents.tools import approval_tool, budget_tool
 from ..api.schemas import TopupRequest, TopupResponse, VCCAgentRequest, VCCApproveRequest
-from ..agents.schemas import PaymentRequest
 from ..db import get_db
 from ..integrations.pingpong.base import NextAction, ProviderPaymentResult, ProviderRefundResult
 from ..integrations.pingpong.checkout_contracts import PingPongWebhookPayload
-from ..integrations.pingpong.mappers import map_webhook
-from ..models import AuditLog, CreditAccount, PaymentOrder, RefundOrder, User, VCCApplication, WebhookEvent, ProviderCallLog
+from ..integrations.pingpong.unified_auth import PingPongWebhookVerifier
+from ..integrations.pingpong.unified_mappers import map_unified_webhook
+from ..models import AuditLog, CreditAccount, CreditLedger, PaymentOrder, ProviderCallLog, RefundOrder, VCCApplication, WebhookEvent
 from ..security import Principal, current_principal, require_role
 from ..services.approval_service import ApprovalService
 from ..services.common import new_id, payload_hash, utcnow, write_audit
 from ..services.issuing_service import IssuingService
-from ..services.payment_service import ConflictError, ForbiddenError, NotFoundError, PaymentService
-from ..services.refund_service import RefundService
+from ..services.payment_service import ConflictError, NotFoundError, PaymentService
 from ..services.reconciliation_service import ReconciliationService
+from ..services.refund_service import RefundService
 
 
 def _explicit_provider_event_id(payload: dict[str, Any]) -> str | None:
@@ -76,6 +75,7 @@ def make_router(
     refund_service: RefundService,
     issuing_service: IssuingService,
     intent_parser: VCCIntentParser | None = None,
+    webhook_verifier: PingPongWebhookVerifier | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
     reconciliation_service = ReconciliationService(payment_service)
@@ -103,6 +103,68 @@ def make_router(
         if principal.role == "developer" and payment.user_id != principal.actor_id: raise HTTPException(404, "payment not found")
         return {"payment_id": payment.id, "payment_status": payment.status, "provider_status": payment.provider_status, "provider_transaction_id": payment.provider_transaction_id, "provider_request_id": payment.provider_request_id, "partner_transaction_id": payment.partner_transaction_id, "amount": str(payment.amount), "currency": payment.currency, "created_at": payment.created_at, "updated_at": payment.updated_at, "next_reconcile_at": payment.next_reconcile_at, "refunded": bool(db.query(RefundOrder).filter_by(payment_id=payment.id, status="SUCCEEDED").first())}
 
+    @router.get("/payments/{payment_id}/timeline")
+    def payment_timeline(payment_id: str, principal: Principal = Depends(current_principal), db: Session = Depends(get_db)):
+        """Return a read-only, correlated view of the payment lifecycle.
+
+        The UI needs one timeline, but the domain deliberately keeps provider
+        calls, webhook deliveries, state observations and ledger entries in
+        separate records. This endpoint correlates those existing records
+        without creating a second state machine or retaining raw payloads.
+        """
+        payment = db.get(PaymentOrder, payment_id)
+        if not payment:
+            raise HTTPException(404, "payment not found")
+        if principal.role == "developer" and payment.user_id != principal.actor_id:
+            raise HTTPException(404, "payment not found")
+
+        events: list[dict[str, Any]] = []
+
+        def add_event(at: Any, title: str, kind: str, status: str | None = None, *, trace_id: str | None = None, provider_status: str | None = None, ledger_result: str | None = None, detail: str | None = None) -> None:
+            events.append({
+                "at": at,
+                "title": title,
+                "kind": kind,
+                "status": status,
+                "trace_id": trace_id,
+                "provider_status": provider_status,
+                "ledger_result": ledger_result,
+                "detail": detail,
+            })
+
+        audits = db.query(AuditLog).filter_by(resource_type="PaymentOrder", resource_id=payment.id).order_by(AuditLog.created_at.asc()).all()
+        for item in audits:
+            if item.action == "CREATE_TOPUP":
+                add_event(item.created_at, "创建订单", "payment", "CREATED", trace_id=item.trace_id, detail="本地 PaymentOrder 已创建")
+            elif item.action == "PAYMENT_OBSERVATION":
+                add_event(item.created_at, "Payment " + item.outcome, "state", item.outcome, trace_id=item.trace_id, provider_status=payment.provider_status, detail="可信 Provider Observation 已进入统一状态机")
+            elif item.action == "RECONCILE_PAYMENT":
+                add_event(item.created_at, "Reconciliation " + item.outcome, "reconcile", item.outcome, trace_id=item.trace_id, provider_status=payment.provider_status, detail="主动查单结果已进入统一状态机")
+
+        calls = db.query(ProviderCallLog).filter(ProviderCallLog.provider_request_id == payment.provider_request_id).order_by(ProviderCallLog.created_at.asc()).all()
+        for item in calls:
+            title = "Provider " + (payment.provider_status or "PROCESSING")
+            add_event(item.created_at, title, "provider", payment.status, trace_id=item.trace_id, provider_status=payment.provider_status, detail=item.operation + (" · " + str(item.latency_ms) + " ms" if item.latency_ms is not None else ""))
+
+        webhook_filter = (WebhookEvent.resource_id == payment.partner_transaction_id)
+        if payment.provider_transaction_id:
+            webhook_filter = webhook_filter | (WebhookEvent.resource_id == payment.provider_transaction_id)
+        webhooks = db.query(WebhookEvent).filter(webhook_filter).order_by(WebhookEvent.received_at.asc()).all()
+        for item in webhooks:
+            add_event(item.received_at, "Webhook " + (item.provider_status or "RECEIVED"), "webhook", item.status, provider_status=item.provider_status, detail=item.error or ("已处理" if item.status == "PROCESSED" else "未处理"))
+
+        ledger = db.query(CreditLedger).filter_by(reference_type="PaymentOrder", reference_id=payment.id).order_by(CreditLedger.created_at.asc()).first()
+        if ledger:
+            add_event(ledger.created_at, "Credits 入账", "ledger", "POSTED", ledger_result="POSTED", detail=str(ledger.credit_amount) + " " + ledger.fiat_currency + " · exactly-once ledger")
+        elif payment.status == "PROCESSING":
+            add_event(payment.updated_at, "等待 Webhook / 可主动查单", "next_action", "WAITING", provider_status=payment.provider_status, detail="Webhook 未确认时，使用主动查单恢复可信状态")
+
+        events.sort(key=lambda item: item["at"] or payment.created_at)
+        return {
+            "payment": {"payment_id": payment.id, "amount": str(payment.amount), "currency": payment.currency, "payment_status": payment.status, "provider_status": payment.provider_status, "provider_request_id": payment.provider_request_id},
+            "events": events,
+        }
+
     @router.post("/payments/{payment_id}/query")
     def query_payment(payment_id: str, request: Request, principal: Principal = Depends(current_principal), db: Session = Depends(get_db)):
         payment = db.get(PaymentOrder, payment_id)
@@ -117,7 +179,7 @@ def make_router(
         query = db.query(PaymentOrder)
         if principal.role == "developer": query = query.filter(PaymentOrder.user_id == principal.actor_id)
         rows = query.order_by(PaymentOrder.created_at.desc()).limit(100).all()
-        return [{"payment_id": x.id, "payment_status": x.status, "provider_status": x.provider_status, "provider_transaction_id": x.provider_transaction_id, "amount": str(x.amount), "currency": x.currency, "created_at": x.created_at} for x in rows]
+        return [{"payment_id": x.id, "payment_status": x.status, "provider_status": x.provider_status, "provider_transaction_id": x.provider_transaction_id, "amount": str(x.amount), "currency": x.currency, "created_at": x.created_at, "refunded": bool(db.query(RefundOrder).filter_by(payment_id=x.id, status="SUCCEEDED").first())} for x in rows]
 
     @router.post("/webhooks/pingpong/checkout")
     async def webhook(request: Request, db: Session = Depends(get_db)):
@@ -129,12 +191,12 @@ def make_router(
         if settings.pingpong_mode == "mock":
             valid = verifier.webhook_valid(raw, signature, settings.pingpong_webhook_secret)
         else:
+            if webhook_verifier is None:
+                raise HTTPException(503, "current PingPong webhook verifier is not configured")
             try:
-                sandbox_payload = json.loads(raw.decode("utf-8"))
-            except Exception:
-                sandbox_payload = {}
-            # Checkout V4 signs accId/clientId/signType/version/bizContent in-body.
-            valid = isinstance(sandbox_payload, dict) and verifier.verify_v4_body(sandbox_payload, settings.pingpong_salt)
+                valid = webhook_verifier.verify(body=raw, headers=request.headers)
+            except RuntimeError as exc:
+                raise HTTPException(503, str(exc)) from exc
         if not valid: raise HTTPException(401, "invalid webhook signature")
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -144,7 +206,7 @@ def make_router(
             raise HTTPException(400, "invalid webhook body")
 
         try:
-            normalized = map_webhook(payload) if settings.pingpong_mode == "sandbox" else _map_mock_webhook(payload)
+            normalized = map_unified_webhook(payload) if settings.pingpong_mode == "sandbox" else _map_mock_webhook(payload)
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, "invalid webhook contract") from exc
 
@@ -243,6 +305,62 @@ def make_router(
         rows = db.query(ProviderCallLog).order_by(ProviderCallLog.created_at.desc()).limit(100).all()
         return [{"operation": x.operation, "trace_id": x.trace_id, "provider_request_id": x.provider_request_id, "http_status": x.http_status, "success": x.success, "error_type": x.error_type, "latency_ms": x.latency_ms} for x in rows]
 
+    @router.get("/admin/debug")
+    def debug_search(payment_id: str | None = None, application_id: str | None = None, trace_id: str | None = None, principal: Principal = Depends(require_role("admin", "fde")), db: Session = Depends(get_db)):
+        """Correlate the safe observability metadata for one FDE investigation."""
+        if not any((payment_id, application_id, trace_id)):
+            raise HTTPException(400, "payment_id, application_id or trace_id is required")
+
+        payment = db.get(PaymentOrder, payment_id) if payment_id else None
+        vcc = db.get(VCCApplication, application_id) if application_id else None
+        if payment_id and not payment:
+            raise HTTPException(404, "payment not found")
+        if application_id and not vcc:
+            raise HTTPException(404, "application not found")
+
+        payment_resource_ids = {payment.id} if payment else set()
+        payment_request_ids = {payment.provider_request_id} if payment else set()
+        payment_resource_ids.update({vcc.id} if vcc else set())
+
+        audit_query = db.query(AuditLog)
+        if trace_id:
+            audit_query = audit_query.filter(AuditLog.trace_id == trace_id)
+        elif payment_resource_ids:
+            audit_query = audit_query.filter(AuditLog.resource_id.in_(payment_resource_ids))
+        audits = audit_query.order_by(AuditLog.created_at.asc()).all()
+        if not payment and not vcc:
+            payment_ids_from_audit = [x.resource_id for x in audits if x.resource_type == "PaymentOrder" and x.resource_id]
+            if payment_ids_from_audit:
+                payment = db.get(PaymentOrder, payment_ids_from_audit[0])
+                if payment:
+                    payment_resource_ids.add(payment.id)
+                    payment_request_ids.add(payment.provider_request_id)
+
+        call_query = db.query(ProviderCallLog)
+        if trace_id:
+            call_query = call_query.filter(ProviderCallLog.trace_id == trace_id)
+        elif payment_request_ids:
+            call_query = call_query.filter(ProviderCallLog.provider_request_id.in_(payment_request_ids))
+        calls = call_query.order_by(ProviderCallLog.created_at.asc()).all()
+
+        webhook_query = db.query(WebhookEvent)
+        if payment:
+            resource_ids = {payment.partner_transaction_id, payment.provider_transaction_id}
+            webhook_query = webhook_query.filter(WebhookEvent.resource_id.in_([x for x in resource_ids if x]))
+        else:
+            webhook_query = webhook_query.filter(False)
+        webhooks = webhook_query.order_by(WebhookEvent.received_at.asc()).all()
+
+        return {
+            "query": {"payment_id": payment_id, "application_id": application_id, "trace_id": trace_id},
+            "payment": {"payment_id": payment.id, "partner_transaction_id": payment.partner_transaction_id, "payment_status": payment.status, "provider_status": payment.provider_status, "amount": str(payment.amount), "currency": payment.currency} if payment else None,
+            "application": {"application_id": vcc.id, "status": vcc.status, "approval_status": vcc.approval_status, "amount": str(vcc.amount), "currency": vcc.currency, "vendor": vcc.vendor} if vcc else None,
+            "provider_calls": [{"operation": x.operation, "trace_id": x.trace_id, "provider_request_id": x.provider_request_id, "http_status": x.http_status, "provider_code": x.provider_code, "success": x.success, "error_type": x.error_type, "latency_ms": x.latency_ms, "created_at": x.created_at} for x in calls],
+            "webhooks": [{"event_type": x.event_type, "resource_id": x.resource_id, "provider_status": x.provider_status, "status": x.status, "error": x.error, "received_at": x.received_at, "processed_at": x.processed_at} for x in webhooks],
+            "audit": [{"actor_role": x.actor_role, "action": x.action, "resource_type": x.resource_type, "resource_id": x.resource_id, "trace_id": x.trace_id, "outcome": x.outcome, "created_at": x.created_at} for x in audits],
+            "retention_note": "为避免保存敏感信息，Provider 原始 Request/Response Body 与签名 Header 不持久化；此处展示可安全关联的请求 ID、HTTP 结果、错误、审计和延迟元数据。",
+        }
+
     @router.get("/admin/webhooks")
     def webhook_events(principal: Principal = Depends(require_role("admin", "fde")), db: Session = Depends(get_db)):
         rows = db.query(WebhookEvent).order_by(WebhookEvent.received_at.desc()).limit(100).all()
@@ -285,7 +403,7 @@ def make_router(
 
     @router.post("/vcc/{application_id}/card")
     def create_card(application_id: str, request: Request, principal: Principal = Depends(require_role("finance", "admin")), db: Session = Depends(get_db)):
-        try: app = issuing_service.create_vcc(db, application_id=application_id, actor_id=principal.actor_id, actor_role=principal.role, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex)
+        try: app = issuing_service.create_vcc(db, application_id=application_id, actor_id=principal.actor_id, actor_role=principal.role, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex, human_confirmed=True)
         except PermissionError as exc: raise HTTPException(403, str(exc))
         except ValueError as exc: raise HTTPException(400, str(exc))
         return {"application_id": app.id, "status": app.status, "provider_card_id": app.provider_card_id, "masked_card": app.masked_card}

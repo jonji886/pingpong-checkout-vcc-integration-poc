@@ -1,0 +1,12 @@
+{
+  "code": "SUCCESS",
+  "data": {
+    "card_id": "card202609060001",
+    "card_number": "532911******2321",
+    "cvc": "123",
+    "card_status": "ACTIVE",
+    "billing_currency": "USD",
+    "transaction_amount_limit": "20000.00",
+    "lifetime_limit": "20000.00"
+  }
+}

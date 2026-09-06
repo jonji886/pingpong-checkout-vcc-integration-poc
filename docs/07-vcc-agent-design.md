@@ -17,7 +17,7 @@ Human Approval（金额超过 1,000 USD）
         ↓
 IssuingService Tool Boundary
         ↓
-Mock IssuingProvider
+Mock / PingPong IssuingProvider
         ↓
 AuditLog
 ```
@@ -46,7 +46,9 @@ DRAFT → PENDING_APPROVAL → APPROVED → CARD_CREATING → ACTIVE → CLOSED
 
 ## Issuing Contract Status
 
-当前只有 `IssuingProvider.create_vcc` 的 Mock 能力。公开 Issuing 页面和具体商户权限不足以让本 POC 安全确认完整 create/get/action/spending-control contract，因此没有编造 `PingPongIssuingAdapter` 字段，也没有将 Mock fixture 写成 `CONTRACT_VERIFIED`。
+当前已有 `MockPingPongIssuingAdapter` 和 `PingPongIssuingHttpAdapter`。HTTP Adapter 按官方公开 Issuing v2 Contract 实现 Create Card、Card Detail、Freeze/Unfreeze/Close、Spending Control、Dedicated Funds balance 和 Authorization logs，并通过 DTO/Mapper 丢弃 PAN/CVC。`card_product_code`、RSA/SM2 signer 和具体卡产品权限由 Sandbox 账户提供；因此当前状态是 `CONTRACT_VERIFIED + MOCK_VERIFIED + SANDBOX_PENDING`，不是 Sandbox Verified。
+
+开卡调用还要求独立的 human confirmation。`POST /api/vcc/{application_id}/card` 是用户明确点击/调用的确认动作；Agent Parser、Budget Tool 和 Approval Service 都不能代替它。直接调用 `IssuingService.create_vcc(..., human_confirmed=False)` 会 fail closed。
 
 ## Evidence
 
@@ -55,6 +57,7 @@ DRAFT → PENDING_APPROVAL → APPROVED → CARD_CREATING → ACTIVE → CLOSED
 - `app/services/issuing_service.py`：Provider call 前做状态/RBAC检查
 - `app/agents/finance_agent.py`：deterministic parser
 - `app/integrations/llm/deepseek.py`：可选 DeepSeek JSON Parser；只做结构化提取
+- `tests/test_pingpong_unified_contract.py`：Issuing v2 request serialization、response parsing、error boundary 和敏感字段丢弃
 
 ## Resume-safe claim
 

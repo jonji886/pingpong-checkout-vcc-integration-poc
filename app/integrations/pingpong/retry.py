@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import logging
 import random
 import time
-import logging
 from typing import Callable, Optional, Protocol, TypeVar
 
 from .base import ProviderError

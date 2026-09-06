@@ -40,7 +40,8 @@ class PaymentService:
             value = Decimal(str(amount))
         except (InvalidOperation, ValueError):
             raise ValueError("amount must be a decimal")
-        if value <= 0 or value.as_tuple().exponent < -2:
+        exponent = value.as_tuple().exponent
+        if value <= 0 or not isinstance(exponent, int) or exponent < -2:
             raise ValueError("amount must be positive with at most 2 decimal places")
         return value.quantize(Decimal("0.01"))
 
@@ -92,9 +93,14 @@ class PaymentService:
         except IntegrityError:
             db.rollback()
             existing = find_idempotency(db, actor_id=actor_id, method="POST", route=route, key=idem_key)
-            if existing and existing.request_hash != req_hash:
+            if existing is None:
+                raise ConflictError("idempotency race could not be resolved")
+            if existing.request_hash != req_hash:
                 raise ConflictError("idempotency key payload conflict")
-            return db.get(PaymentOrder, existing.resource_id), None
+            resolved = db.get(PaymentOrder, existing.resource_id)
+            if resolved is None:
+                raise NotFoundError("idempotent payment missing")
+            return resolved, None
 
         started = time.monotonic()
         try:
@@ -123,7 +129,10 @@ class PaymentService:
             return payment, None
 
     def apply_observation(self, db: Session, *, payment_id: str, result: ProviderPaymentResult, trace_id: str, source: str) -> str:
-        payment = db.get(PaymentOrder, payment_id)
+        # PostgreSQL takes a row lock here. SQLite serializes the write at
+        # flush time; the ledger unique constraint remains the final effect
+        # guard for the local POC.
+        payment = db.query(PaymentOrder).filter_by(id=payment_id).with_for_update().populate_existing().one_or_none()
         if not payment: raise NotFoundError("payment not found")
         old = payment.status
         target = transition(old, result.provider_status)

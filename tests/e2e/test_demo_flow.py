@@ -11,7 +11,6 @@ from app.db import Base, engine
 from app.integrations.pingpong.mock_checkout import MockPingPongCheckoutAdapter
 from app.main import create_app
 
-
 pytestmark = pytest.mark.e2e
 
 
@@ -119,7 +118,28 @@ def test_vcc_requires_approval_before_card_creation(e2e_client):
 
 def test_ui_and_swagger_entrypoints(e2e_client):
     client, _provider = e2e_client
-    for path in ("/docs", "/ui/developer", "/ui/finance", "/ui/fde", "/ui/vcc"):
+    for path in ("/docs", "/ui/demo", "/ui/developer", "/ui/finance", "/ui/fde", "/ui/vcc"):
         response = client.get(path)
         assert response.status_code == 200
         assert "DemoAI" in response.text or path == "/docs"
+
+
+def test_payment_timeline_and_debug_search_are_correlated(e2e_client):
+    client, _provider = e2e_client
+    payment_id = create_topup(client, key="timeline-topup")
+
+    timeline = client.get("/api/payments/" + payment_id + "/timeline", headers=auth("developer"))
+    assert timeline.status_code == 200
+    assert any(event["title"] == "创建订单" for event in timeline.json()["events"])
+    assert any(event["title"].startswith("Provider ") for event in timeline.json()["events"])
+
+    debug = client.get("/api/admin/debug", params={"payment_id": payment_id}, headers=auth("admin"))
+    assert debug.status_code == 200
+    debug_data = debug.json()
+    assert debug_data["payment"]["payment_id"] == payment_id
+    assert debug_data["provider_calls"]
+    trace_id = debug_data["provider_calls"][0]["trace_id"]
+
+    trace_debug = client.get("/api/admin/debug", params={"trace_id": trace_id}, headers=auth("admin"))
+    assert trace_debug.status_code == 200
+    assert any(item["trace_id"] == trace_id for item in trace_debug.json()["provider_calls"])

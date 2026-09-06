@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pingpong
+      POSTGRES_USER: pingpong
+      POSTGRES_PASSWORD: pingpong-local-only
+    ports:
+      - "5432:5432"
+    volumes:
+      - pingpong-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pingpong -d pingpong"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    environment:
+      PINGPONG_MODE: mock
+      PINGPONG_WEBHOOK_SECRET: local-demo-secret
+      DATABASE_URL: postgresql+psycopg://pingpong:pingpong-local-only@postgres:5432/pingpong
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pingpong-postgres:

@@ -14,52 +14,52 @@ DemoAI 需要通过 Checkout 为开发者充值 Credits。支付创建、查询�
 
 | document_name | url | api_version | official_last_updated_at | reviewed_at |
 | --- | --- | --- | --- | --- |
-| API Endpoint Addresses | https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/guide/endpoint/ | V4 | 2025-10-31 | 2026-09-06 |
-| Basic Rules for API Usage | https://acquirer-api-docs-v4.pingpongx.com/en/notes/guide/APIUsage/ | V4 | 2025-03-07 | 2026-09-06 |
-| Signature Convention | https://acquirer-api-docs-v4.pingpongx.com/en/notes/guide/sign/ | V4 | 2025-03-07 | 2026-09-06 |
-| API Only (Non-Hosted Mode) | https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/uniformly/ | V4 | 2025-03-07 | 2026-09-06 |
-| Transaction Query | https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/getOne/ | V4 | 2025-03-07 | 2026-09-06 |
-| Request Refund | https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/modifications/refund/ | V4 | 2025-03-07 | 2026-09-06 |
-| Refund Query | https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/getRefund/ | V4 | 2025-03-07 | 2026-09-06 |
-| Payment Notification | https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/notify/payment/notify/ | V4 | 2025-03-07 | 2026-09-06 |
-| Refund Notification | https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/notify/refundNotify/ | V4 | 2025-03-07 | 2026-09-06 |
+| Unified Checkout Create Session | https://docs.pingpongx.com/api/acq/payment/create-a-session?version=v4 | V4 | 2026-06-18 | 2026-09-06 |
+| Unified Checkout Create Payment | https://docs.pingpongx.com/api/acq/payment/create-a-payment?version=v4 | V4 | 2026-06-18 | 2026-09-06 |
+| Unified Checkout Query / Refund | https://docs.pingpongx.com/api/acq/payment/query-a-payment?version=v4 | V4 | 2026-06-18 | 2026-09-06 |
+| Unified Checkout Webhook | https://docs.pingpongx.com/api/webhooks/checkout-webhook | V4 | 2026-06-18 | 2026-09-06 |
+| Unified Issuing Create Card | https://docs.pingpongx.com/api/issuing/cards/create-a-card?version=v2 | V2 | 2026-03-25 | 2026-09-06 |
+| Unified Issuing Card Detail / Actions | https://docs.pingpongx.com/api/issuing/cards/query-card-details?version=v2 | V2 | 2026-03-25 | 2026-09-06 |
 
-The user-supplied prompt also referenced `docs.pingpongx.com` pages and `/api/acq/v4/...` paths. Those JavaScript pages did not expose a readable contract during this review, while the linked public V4 developer guide exposed the contract below. The two path families are not merged or presented as interchangeable.
+The current official docs expose the `/api/acq/v4/...` unified contract. The older public Checkout V4 developer guide exposes a different envelope and `/v4/payment/...` path family. The two contracts are not merged or presented as interchangeable.
 
 ## Decision
 
-The Sandbox adapter targets the readable public Checkout V4 contract:
+The current Sandbox adapter targets the unified Checkout V4 contract:
 
 ```text
-POST /v4/payment/prePay       # Hosted Checkout used by this POC
-POST /v4/payment/query
-POST /v4/payment/refund
-POST /v4/payment/getRefund
+POST /api/acq/v4/sessions/create
+POST /api/acq/v4/payments/query
+POST /api/acq/v4/refunds/create
+POST /api/acq/v4/refunds/query
 ```
+
+The historical `/v4/payment/prePay` adapter remains available as the
+explicitly named `PingPongSandboxCheckoutAdapter` for Legacy Public Sandbox
+contract tests. It is not selected by the current factory.
 
 The local Domain model remains independent from Provider names. Provider DTOs in `app/integrations/pingpong/checkout_contracts.py` and mappers in `mappers.py` are the only boundary used by the HTTP adapter. Mock and Sandbox adapters implement the same `CheckoutProvider` port.
 
 ## Verified
 
-- Requests and responses use JSON and the public V4 envelope fields `accId`, `clientId`, `signType`, `sign`, `version`, and `bizContent`.
-- V4 signatures use all message fields except `sign`, sorted by key, with the configured salt prepended; public documentation describes MD5 and SHA256.
-- Hosted create uses `merchantTransactionId`, `amount`, `currency`, `payResultUrl`, `payCancelUrl`, `notificationUrl`, `captureDelayHours`, `goods`, `shopperIP`, and optional `tradeCountry` as documented fields. Merchant/product conditions still apply.
-- Query accepts the merchant transaction ID and/or provider transaction ID; this POC sends the merchant transaction ID. The local request ID remains a correlation value in Hosted mode.
-- Refund create uses `merchantTransactionId`, `merchantRefundId`, `amount`, `currency`, and optional `notificationUrl`.
-- Refund query uses `/v4/payment/getRefund` and requires `merchantTransactionId` plus `merchantRefundId` or `refundId`; the adapter sends the merchant IDs available to the local service.
-- Documented payment status values include `INIT`, `PROCESSING`, `SUCCESS`, `FAILED`, `AUTH_SUCCESS`, `CANCEL`, and `CLOSED`. The local mapper keeps Provider status and applies a separate Domain mapping.
-- Payment notifications expose `merchantTransactionId`, `transactionId`, `notifyType`, `currency`, `amount`, and `status`; refund notifications expose `merchantRefundId`, `refundId`, and `status`.
-- Hosted create returns a provider `paymentUrl` for customer action; query recovery remains the source of truth when notification delivery is missing.
-- Hosted-mode `paymentUrl` is a documented customer action. Unknown non-hosted `action` shapes are not guessed; they map to `NONE` until the merchant account's action contract is confirmed.
+- Current unified requests use `Authorization`, `sign`, and `sign-version`; the adapter delegates the RSA/SM2 signer to an explicit infrastructure port.
+- Session create uses `request_id`, `partner_transaction_id`, `amount`, `currency`, and optional redirect/notify/cancel fields; `action.redirect_url` maps to `next_action`.
+- A successfully created Session is `PROCESSING`, not payment `SUCCESS`; Query/Webhook provides payment status.
+- Current unified Query/Refund fields use request and partner IDs, amount, and currency; Provider DTOs are mapped before entering the domain.
+- Current Checkout webhook samples are flat payment/refund events; they are mapped by `map_unified_webhook` and never parsed as the Legacy envelope.
+- The adapter never serializes direct card data and does not infer a payment-method contract.
+- Issuing v2 card creation uses a configured `card_product_code`, explicit spending limits, and `apply_coupon`; card detail/action/authorization-log endpoints are separately mapped.
+- Card detail fields `card_number` and `cvc` are intentionally dropped at the adapter boundary.
 
 ## Unverified / Sandbox Pending
 
-- Sandbox credentials, salt/account values and merchant product permissions.
-- Merchant-specific required values for `goods`, `shopperIP`, redirect/callback reachability, and any risk-control fields.
-- Whether the user account is enabled for the Hosted `prePay` flow used by this POC.
-- API-only `unifiedPay` remains a separate known path and is not invoked because its card/risk-control contract is outside this POC.
+- Sandbox credentials, signing key, account and product permissions.
+- Whether the account is enabled for the unified hosted Session flow.
+- The signer canonicalization implementation for the account's RSA/SM2 key remains an injected infrastructure responsibility; it is not guessed here.
+- The account-level webhook verification material is also an injected infrastructure responsibility; without it, the Sandbox webhook route fails closed.
+- Direct current Checkout create-payment is not invoked because this POC uses hosted Session and must not collect PAN/CVV.
 - The real callback URL reachability and account-specific notification retry behavior in this POC environment.
-- No real successful Sandbox payment, callback or refund was executed by this change.
+- No real successful Sandbox payment, callback, refund, card issuance or transaction query was executed by this change.
 
 ## Consequences
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Mapping
 
-from ...domain.vcc import CardStatus, SpendingControl, transition_card
+from ...domain.vcc import CardStatus, transition_card
 
 
 class MockPingPongIssuingAdapter:
@@ -55,3 +55,7 @@ class MockPingPongIssuingAdapter:
     def get_balance(self, *, provider_card_id: str) -> dict[str, Any]:
         card = self.get_card(provider_card_id=provider_card_id)
         return {"provider_card_id": provider_card_id, "currency": card["currency"], "available": "0.00", "source": "mock"}
+
+    def query_transactions(self, *, provider_card_id: str, page_no: int = 1, page_size: int = 20) -> dict[str, Any]:
+        self.get_card(provider_card_id=provider_card_id)
+        return {"total": 0, "transactions": [], "page_no": page_no, "page_size": page_size, "source": "mock"}

@@ -12,7 +12,7 @@ SANDBOX_PENDING     本仓库没有宣称真实成功 Sandbox E2E
 
 ## Prerequisites
 
-- Python 3.9+（CI 使用 Python 3.11）。
+- Python 3.10+（CI 使用 Python 3.11）。
 - 本地 SQLite；无需真实 PingPong credential。
 - `PINGPONG_MODE=mock`，不要把本地 `.env` 改成 Sandbox 后期待自动完成联调。
 
@@ -34,7 +34,7 @@ PINGPONG_MODE=mock PINGPONG_WEBHOOK_SECRET=local-demo-secret python3 -m uvicorn 
 | Approver | `approver-token` | VCC 审批 |
 | Admin/FDE | `admin-token` / `fde-token` | Debug、Webhook、对账 |
 
-这套 token 不是 PingPong Provider Auth。真实接入必须使用组织的认证/RBAC，并由 Provider Adapter 使用配置的 V4 `accId`、`clientId` 和 salt 签名；Secret 不进入业务服务、日志或前端。
+这套 token 不是 PingPong Provider Auth。当前统一 API 使用 `Authorization`、`sign`、`sign-version`；签名由 infrastructure signer 注入 Adapter，不能根据其他平台猜 canonicalization。Secret 不进入业务服务、日志或前端。
 
 ## Integration Flow
 
@@ -68,7 +68,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/payments/{payment_id}/query \
 python3 scripts/simulate_webhook.py txn_{payment_id} --status SUCCESS --amount 100.00
 ```
 
-重复发送相同通知只返回成功确认，不产生第二笔 TOPUP ledger。真实 PingPong V4 notification 使用 body envelope/signature；本地 Mock 的 `X-Mock-Signature` 只属于 deterministic test contract。
+重复发送相同通知只返回成功确认，不产生第二笔 TOPUP ledger。当前公开 Checkout webhook 是 flat payment/refund event；本仓库通过显式注入的 `PingPongWebhookVerifier` 执行验签，未确认账户级验签方式时 Sandbox webhook 会 fail closed。Mock 的 `X-Mock-Signature` 只属于 deterministic test contract。
 
 ### 4. Inspect Payment
 
@@ -112,18 +112,33 @@ provider_call_id         本地 ProviderCallLog 主键
 delivery_fingerprint     无官方 event ID 时的本地 webhook 去重值
 ```
 
-## Provider V4 Contract Boundary
+## Current Unified Provider Contract Boundary
 
 本次可读取的公开 V4 开发文档使用：
 
 ```text
-POST /v4/payment/prePay       # 本 POC 使用：Hosted Checkout
-POST /v4/payment/query
-POST /v4/payment/refund
-POST /v4/payment/getRefund
+POST /api/acq/v4/sessions/create       # 本 POC 使用：Hosted Checkout Session
+POST /api/acq/v4/payments/query
+POST /api/acq/v4/refunds/create
+POST /api/acq/v4/refunds/query
 ```
 
-JSON envelope 包含 `accId`、`clientId`、`signType`、`sign`、`version`、`bizContent`。Hosted `prePay` 要求 `payResultUrl`、`payCancelUrl`、`shopperIP` 和 `goods`，返回的 `paymentUrl` 由客户端打开；本 POC 不采集或发送 PAN/CVV。API-only `unifiedPay` 是独立的卡数据路径，不由本 POC 调用。具体商户的 callback 和 enabled product 仍需账户契约确认。详见 [ADR-001](adr/ADR-001-pingpong-checkout-v4-contract.md)。
+统一 API 返回 `{code,message,data}`。Session 返回的 `action.redirect_url` 只代表客户动作；Session 创建成功不代表付款成功。Query/Webhook 才能推进支付状态；本 POC 不采集或发送 PAN/CVV。直接 Create Payment 的卡数据路径不由本 POC 调用。具体商户的 callback、signer、enabled product 仍需账户契约确认。详见 [ADR-001](adr/ADR-001-pingpong-checkout-v4-contract.md)。
+
+历史公开 `prePay` envelope 代码和 fixture 仍保留，但标记为 `Legacy Public Sandbox`，不与当前 unified API 混用。
+
+### Issuing v2 HTTP Adapter
+
+当前 HTTP Adapter 已实现官方公开的：
+
+- `POST /api/issuing/card/v2/apply`：Create Card，需要配置 `PINGPONG_ISSUING_CARD_PRODUCT_CODE`。
+- `GET /api/issuing/card/v2/detail`：Query Card Detail。
+- `POST /api/issuing/card/v2/freeze|unfreeze|close`：Card Action。
+- `POST /api/issuing/spending-control/v2/share-card-limit`：Control Spending。
+- `GET /api/issuing/card/v2/normal/balance`：Query Dedicated Funds Card balance。
+- `GET /api/issuing/transaction/v2/authorizations`：Query authorization logs。
+
+Create/Action/Spending Control 使用签名头；Query 类接口只使用官方要求的 Authorization。Card detail 中的 PAN/CVC 在 Adapter boundary 丢弃。Issuing 具体卡产品和 Sandbox 权限仍为 Pending。
 
 ## Status Mapping
 
@@ -143,7 +158,7 @@ Refund 是独立状态机：`CREATED → PROCESSING → SUCCEEDED|FAILED`；余�
 | HTTP/provider situation | Local behavior |
 | --- | --- |
 | 400 | `ProviderRejected`，不重试，检查字段/商户产品 |
-| 401/403 | `ProviderAuthError`，不重试，检查 accId/clientId/salt/权限 |
+| 401/403 | `ProviderAuthError`，不重试，检查 Authorization/sign/sign-version/权限 |
 | 409 | 幂等或业务冲突，复用原资源或人工检查，不生成新交易 |
 | 429 | `ProviderRateLimited`，读取 `Retry-After`，bounded backoff；不无限重试 |
 | 5xx | `ProviderUnavailable`，Query 可有限重试；Create 结果未知时先 Query |
@@ -152,7 +167,7 @@ Refund 是独立状态机：`CREATED → PROCESSING → SUCCEEDED|FAILED`；余�
 ## Webhook Requirements
 
 1. 使用 HTTPS/public callback；原始 body 先验签。
-2. Sandbox V4 使用官方 body envelope/full-message signature；Mock 使用本地 HMAC，仅限本地。
+2. Sandbox current Unified Webhook 使用显式注入的账户级 verifier；未配置 verifier 时返回 503 并不执行业务逻辑。Mock 使用本地 HMAC，仅限本地。
 3. 验签失败返回 401；合法但未知订单/状态/金额 mismatch 写安全事件并安全确认。
 4. 对 `provider_event_id`（仅官方明确提供时）或 `delivery_fingerprint` 建唯一约束。
 5. 业务处理完成后 ACK；真实 Provider 重试策略以当前官方文档和账户契约为准。

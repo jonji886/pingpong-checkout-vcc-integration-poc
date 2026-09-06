@@ -1,6 +1,6 @@
 **# SPEC.md — AI Platform Global Payment Integration（PingPong FDE POC）**
 
-\> 版本：v1.3
+\> 版本：v1.4
 
 \> 状态：Ready for Implementation  
 
@@ -8,7 +8,7 @@
 
 \> 目标读者：本地 Coding Agent / 面试官 / FDE / 开发者
 
-变更记录（v1.3，2026-09-06）：补充当前可读取的官方 Checkout V4 envelope/endpoint/signature 来源；将本地 Ledger 语义限定为事务边界内的 idempotent business effect；明确无官方 event ID 时使用 `delivery_fingerprint`；VCC 统一称为 `VCC Workflow Assistant`，支持 deterministic parser 和可选 LLM structured parser。
+变更记录（v1.4，2026-09-06）：以当前官方 Unified Checkout/Issuing V2 文档校正主路径；保留旧版 `/v4/payment/*` 为 Legacy Contract；补充 current adapter、DTO/Mapper、fixture contract test、VCC Issuing human confirmation、并发 Observation 与 CI 验证边界。
 
 \---
 
@@ -772,27 +772,22 @@ payment.transition\_to(...)
 
 优先参考当前 PingPong 官方 Checkout V4 文档。
 
-本次复核的可读取官方 Checkout V4 developer guide 当前公开接口包括：
+当前 Unified Checkout V4 主路径为：
 
 \`\`\`text
 
-POST /v4/payment/prePay
-
-POST /v4/payment/query
-
-POST /v4/payment/refund
-
-POST /v4/payment/getRefund
+POST /api/acq/v4/sessions/create
+POST /api/acq/v4/payments/query
+POST /api/acq/v4/refunds/create
+POST /api/acq/v4/refunds/query
 
 \`\`\`
 
-说明：Prompt 初始资料中的 `/api/acq/v4/...` 路径未能从当前可读取的公开页面取得完整契约；本项目不将两套路径混写，具体证据与未确认项见 `docs/adr/ADR-001-pingpong-checkout-v4-contract.md`。
-
-官方文档导航还列出 Create Session，但在未取得 Sandbox 测试账户和已开通产品的精确契约前，不得假定其 endpoint、字段或返回 URL。
+Create Session 是本 POC 的 Hosted Checkout 入口；Create Payment 的 direct-card 路径需要卡数据，不属于本 POC。Session 创建成功只代表获得客户动作入口，不代表支付成功。
 
 本项目 P0 使用：
 
-\- create payment
+\- create hosted session
 
 \- query payment
 
@@ -802,19 +797,21 @@ POST /v4/payment/getRefund
 
 \- checkout webhook
 
-Create Payment 应使用：
+Session Create 至少使用：
+
+\- \`request\_id\`：请求幂等 / 关联 ID
 
 \- \`partner\_transaction\_id\`：DemoAI 商户订单业务 ID
 
-\- \`request\_id\`：请求幂等 ID
+响应中的 `action.redirect_url` 映射为本地 `next_action=REDIRECT`。客户 redirect 不能决定支付终态，终态只来自已验签 Webhook、Query / Reconciliation 或 Create 返回的可信 Provider Observation。
 
-本 POC 使用 Hosted `prePay`。客户后续操作应读取官方响应中的 `paymentUrl` 并映射为本地 `next_action=REDIRECT`；不得假定响应一定含 `checkout_url`。API-only `unifiedPay` 是独立的卡数据/PCI 路径，不属于本 POC。
+认证使用 `Authorization`，需要签名的请求还使用 `sign` 与 `sign-version`；签名算法和 canonicalization 必须由官方 Contract / 注入的 signer 提供，不能猜测。
 
-P0 不得向 PingPong 发送 PAN、CVV 或由本 POC 收集的卡信息。payment\_method 的可用取值、客户动作和 Sandbox 测试数据必须以已开通产品的官方资料为准。
+P0 不得向 PingPong 发送 PAN、CVV 或由本 POC 收集的卡信息。API-only direct payment 的卡数据路径不在本项目 Scope。
 
-不得自己假定任何未从官方文档确认的 PingPong 字段格式。
+旧版 `POST /v4/payment/prePay`、`/v4/payment/query`、`/v4/payment/refund`、`/v4/payment/getRefund` 只作为 `Legacy Contract` 保留，不能与 current Unified Adapter 混用。证据和迁移决策见 `docs/adr/ADR-001-pingpong-checkout-v4-contract.md`。
 
-Coding Agent 在实现 Sandbox Adapter 前必须重新核对当前官方文档。
+不得自己假定任何未从官方文档确认的 PingPong 字段格式。Coding Agent 在实现真实 Sandbox Adapter 前必须重新核对当前官方文档。
 
 \---
 
@@ -828,7 +825,7 @@ PINGPONG\_MODE=mock|sandbox
 
 \`\`\`
 
-PINGPONG\_MODE 必须显式配置，禁止自动 fallback。Sandbox 模式启动时必须校验对应的 base URL、`accId`、`clientId`、salt、Hosted 支付结果/取消地址、HTTPS notify URL 和 shopper IP；缺失任一必需项必须 fail fast，且错误信息不得包含 Secret。
+PINGPONG\_MODE 必须显式配置，禁止自动 fallback。当前 Unified Sandbox 模式启动时必须校验 base URL、access token、sign-version、Hosted result/cancel URL 和 HTTPS notify URL；缺失任一必需项必须 fail fast，且错误信息不得包含 Secret。Legacy Adapter 的 `accId/clientId/salt` 仅属于 Legacy Contract 配置。
 
 **### mock**
 
@@ -876,7 +873,7 @@ Adapter 必须按照对应官方文档实现：
 
 禁止凭经验编造签名算法。
 
-\`PingPongAuthProvider\` 必须与业务 Adapter 分离。
+\`PingPongAuthProvider\` / Unified signer 必须与业务 Adapter 分离。查询类 Issuing V2 GET 使用 Authorization；创建和动作类请求按当前 Contract 注入 \`sign\` / \`sign-version\`。
 
 \`\`\`text
 
@@ -884,11 +881,11 @@ PaymentService
 
     ↓
 
-PingPongCheckoutAdapter
+PingPongUnifiedCheckoutAdapter
 
     ↓
 
-PingPongAuthProvider
+PingPongUnifiedAuthProvider
 
 \`\`\`
 
@@ -1734,6 +1731,8 @@ next\_action 可以为 REDIRECT、QR\_CODE 或 NONE。URL 属于一次性客户�
 
 8\. Handler 只做必要工作；可选 LLM 调用必须有明确 timeout，失败时进入 `NEEDS_CLARIFICATION`，不得阻塞或改变资金流程。
 
+当前 Unified Checkout webhook 使用 flat payment/refund event；current mapper 不能解析为 Legacy \`bizContent\` envelope。账户级验签实现必须作为 infrastructure verifier 注入；未确认签名契约时 Sandbox webhook 必须 fail closed，不得复用 Legacy \`accId/clientId/salt\` body verifier。
+
 Mock 模式允许：
 
 \`X-Mock-Signature\`。
@@ -1890,7 +1889,9 @@ next\_action.qr\_payload  仅内存中返回给调用方，不持久化
 
 MockPingPongCheckoutAdapter
 
-PingPongSandboxCheckoutAdapter
+PingPongUnifiedCheckoutAdapter
+
+LegacyPingPongCheckoutAdapter（仅保留旧版 /v4/payment/* Contract）
 
 \`\`\`
 
@@ -2296,7 +2297,7 @@ error\_type
 
 **## 22.2 Integration Test**
 
-业务集成测试使用 Mock Adapter + Test DB。Sandbox Adapter 必须使用 httpx MockTransport / 固定官方契约样本做无 Secret 的协议映射测试；真实 Sandbox 验证不属于 CI。
+业务集成测试使用 Mock Adapter + Test DB。Sandbox Adapter 必须使用 httpx MockTransport / 固定官方契约样本做无 Secret 的协议映射测试；真实 Sandbox 验证不属于 CI。必须覆盖 Webhook×Webhook、Webhook×Query、Webhook×Reconciliation 的并发观察，明确 PostgreSQL row lock 与 DB unique constraint 的边界；SQLite 只作为本地近似验证。
 
 **### TC01 — 正常支付 / 可信终态统一处理**
 
@@ -3220,13 +3221,13 @@ Acceptance：
 
 \---
 
-**## Story P1-04 — Issuing Sandbox Adapter**
+**## Story P1-04 — Issuing Provider Adapter**
 
-仅在拥有合法凭证后实现。
+先完成 current Issuing V2 的 DTO / Mapper / HTTP Adapter / Contract fixture / Mock 验证；真实 Sandbox 仅在合法凭证、产品权限和 callback 等外部前置条件齐备后执行。
 
 Acceptance：
 
-\- 使用真实 Sandbox
+\- 不把 Contract / Mock Verified 写成真实 Sandbox Verified
 
 \- 自动化测试不得依赖 Production
 
@@ -3376,23 +3377,33 @@ README 最后需要提供一个 10 分钟 Demo Script。
 
 当前验证到的公开资料基线：
 
-1\. PingPong Checkout V4 Overview / Create Payment  
+1\. PingPong Checkout V4 Create a Session
 
-   https\://docs.pingpongx.com/api/acq/create-a-payment
+   https\://docs.pingpongx.com/api/acq/payment/create-a-session?version=v4
 
-2\. PingPong Checkout Webhook  
+2\. PingPong Checkout V4 Query / Refund
+
+   https\://docs.pingpongx.com/api/acq/payment/query-a-payment?version=v4
+
+   https\://docs.pingpongx.com/api/acq/payment/create-a-refund?version=v4
+
+3\. PingPong Checkout Webhook
 
    https\://docs.pingpongx.com/api/webhooks/checkout-webhook
 
-3\. PingPong API Sandbox / Product APIs  
+4\. PingPong Issuing V2 Card APIs
+
+   https\://docs.pingpongx.com/api/issuing/cards/create-a-card?version=v2
+
+5\. PingPong API Sandbox / Product APIs
 
    https\://docs.pingpongx.com/api/home/sandbox
 
-4\. PingPong 开放平台快速接入  
+6\. PingPong 开放平台快速接入
 
    https\://open.pingpongx.com/docs/developer/guide/quick-access/
 
-5\. PingPong Checkout Get Started / Sandbox Account  
+7\. PingPong Checkout Get Started / Sandbox Account
 
    https\://docs.pingpongx.com/doc/checkout/online-payment/get-started/get-started
 
@@ -3408,11 +3419,13 @@ README 最后需要提供一个 10 分钟 Demo Script。
 
 \- 注意接口调用频率 / 429
 
-\- Checkout V4 Create Payment 支持 \`(partner\_transaction\_id, request\_id)\` 级别幂等语义
+\- Unified Checkout V4 Hosted Session 使用 request\_id、partner\_transaction\_id、amount、currency，并通过 action.redirect\_url 提供客户动作入口
 
-\- Checkout V4 Create Payment 的客户后续操作以 action 为准，redirect\_url 不是支付终态依据
+\- Unified Checkout / Issuing v2 使用 Authorization；需要签名的写请求另带 sign、sign-version，签名 canonicalization 不能由本项目猜测
 
-\- Checkout Payment Provider 状态至少需映射 PENDING、SUCCESS、AUTH\_SUCCESS、FAIL、CLOSE
+\- Checkout Provider 状态必须映射为本地状态机；不同 API 版本的原始状态不得直接进入业务层
+
+\- Issuing v2 的 card apply、freeze/unfreeze/close、spending-control 是写操作；detail、balance、authorization logs 是查询操作；detail 返回的 PAN/CVC 不进入本地业务响应或日志
 
 \- Sandbox 测试账户需要通过 PingPong 技术支持获取；未获得账户时不得伪造 Sandbox 验证结论
 
