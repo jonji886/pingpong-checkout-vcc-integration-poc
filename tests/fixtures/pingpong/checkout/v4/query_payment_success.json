@@ -1,0 +1,19 @@
+{
+  "accId": "REDACTED_ACC_ID",
+  "bizContent": {
+    "transactionId": "2023082950003030",
+    "merchantTransactionId": "PMT-DEMO-001",
+    "currency": "USD",
+    "amount": "100.000000",
+    "requestId": "REQ-DEMO-001",
+    "resultCode": "000000",
+    "resultDescription": "Transaction succeeded",
+    "captureDelayHours": 0,
+    "status": "SUCCESS"
+  },
+  "clientId": "REDACTED_CLIENT_ID",
+  "code": "001000",
+  "description": "Successful request",
+  "sign": "REDACTED_SIGNATURE",
+  "signType": "SHA256"
+}

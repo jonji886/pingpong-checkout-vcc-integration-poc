@@ -11,11 +11,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..agents.finance_agent import parse_payment_request
+from ..agents.finance_agent import RuleBasedIntentParser, VCCIntentParser, is_unsafe_request, unsafe_request
 from ..agents.tools import approval_tool, budget_tool
 from ..api.schemas import TopupRequest, TopupResponse, VCCAgentRequest, VCCApproveRequest
+from ..agents.schemas import PaymentRequest
 from ..db import get_db
 from ..integrations.pingpong.base import NextAction, ProviderPaymentResult, ProviderRefundResult
+from ..integrations.pingpong.checkout_contracts import PingPongWebhookPayload
+from ..integrations.pingpong.mappers import map_webhook
 from ..models import AuditLog, CreditAccount, PaymentOrder, RefundOrder, User, VCCApplication, WebhookEvent, ProviderCallLog
 from ..security import Principal, current_principal, require_role
 from ..services.approval_service import ApprovalService
@@ -26,9 +29,57 @@ from ..services.refund_service import RefundService
 from ..services.reconciliation_service import ReconciliationService
 
 
-def make_router(payment_service: PaymentService, refund_service: RefundService, issuing_service: IssuingService) -> APIRouter:
+def _explicit_provider_event_id(payload: dict[str, Any]) -> str | None:
+    """Return an ID only when the provider payload explicitly supplies one."""
+    for key in ("event_id", "eventId", "webhook_id", "webhookId"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _map_mock_webhook(payload: dict[str, Any]) -> PingPongWebhookPayload:
+    """Map the intentionally small local Mock contract to the same DTO shape."""
+    declared_type = str(payload.get("event_type") or payload.get("eventType") or payload.get("type") or "").lower()
+    is_refund = "refund" in declared_type or any(key in payload for key in ("refund_id", "partner_refund_id", "refundId", "provider_refund_id"))
+    from ..integrations.pingpong.checkout_contracts import _decimal_or_none, _first_str, _upper_or_none
+    return PingPongWebhookPayload(
+        event_type="refund" if is_refund else "payment",
+        merchant_transaction_id=_first_str(payload, "partner_transaction_id", "partnerTransactionId", "merchantTransactionId"),
+        transaction_id=_first_str(payload, "provider_transaction_id", "transaction_id", "transactionId", "paymentId"),
+        merchant_refund_id=_first_str(payload, "partner_refund_id", "partnerRefundId", "merchantRefundId"),
+        refund_id=_first_str(payload, "refund_id", "refundId", "provider_refund_id"),
+        request_id=_first_str(payload, "request_id", "requestId"),
+        amount=_decimal_or_none(payload.get("amount")),
+        currency=_upper_or_none(payload.get("currency")),
+        status=_first_str(payload, "status", "paymentStatus", "tradeStatus") or "",
+        notify_type=_upper_or_none(payload.get("notifyType")),
+        raw=payload,
+    )
+
+
+def _clarification_question(parsed: PaymentRequest) -> str | None:
+    if not parsed.missing_fields:
+        return None
+    labels = {
+        "vendor": "供应商",
+        "amount": "金额",
+        "currency": "币种",
+        "request": "完整的用卡申请",
+    }
+    fields = "、".join(labels.get(item, item) for item in parsed.missing_fields)
+    return "请补充：" + fields + "。"
+
+
+def make_router(
+    payment_service: PaymentService,
+    refund_service: RefundService,
+    issuing_service: IssuingService,
+    intent_parser: VCCIntentParser | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api")
     reconciliation_service = ReconciliationService(payment_service)
+    intent_parser = intent_parser or RuleBasedIntentParser()
 
     @router.get("/me/credits")
     def credits(principal: Principal = Depends(require_role("developer", "finance", "admin", "fde")), db: Session = Depends(get_db)):
@@ -83,42 +134,39 @@ def make_router(payment_service: PaymentService, refund_service: RefundService, 
             except Exception:
                 sandbox_payload = {}
             # Checkout V4 signs accId/clientId/signType/version/bizContent in-body.
-            valid = isinstance(sandbox_payload, dict) and verifier.verify_v4_body(sandbox_payload, settings.pingpong_app_secret or settings.pingpong_webhook_secret)
+            valid = isinstance(sandbox_payload, dict) and verifier.verify_v4_body(sandbox_payload, settings.pingpong_salt)
         if not valid: raise HTTPException(401, "invalid webhook signature")
-        try: payload = json.loads(raw.decode("utf-8"))
-        except Exception: raise HTTPException(400, "invalid webhook body")
-        if isinstance(payload, dict) and isinstance(payload.get("bizContent"), str):
-            try:
-                nested = json.loads(payload["bizContent"])
-                if isinstance(nested, dict):
-                    payload = {**payload, **nested}
-            except Exception:
-                pass
-        # Strict allowlist; tolerate requestId/request_id naming difference.
-        status_value = str(payload.get("status") or payload.get("paymentStatus") or payload.get("tradeStatus") or "").upper()
-        declared_type = str(payload.get("event_type") or payload.get("eventType") or payload.get("type") or "").lower()
-        is_refund = "refund" in declared_type or any(k in payload for k in ("refund_id", "partner_refund_id", "refundId", "provider_refund_id"))
-        tx = payload.get("partner_transaction_id") or payload.get("partnerTransactionId") or payload.get("merchantTransactionId")
-        provider_tx = payload.get("provider_transaction_id") or payload.get("transaction_id") or payload.get("transactionId") or payload.get("paymentId")
-        amount_raw = payload.get("amount")
-        currency = str(payload.get("currency") or "").upper() or None
-        request_id = payload.get("request_id") or payload.get("requestId")
-        refund_resource = payload.get("partner_refund_id") or payload.get("partnerRefundId") or payload.get("refundId") or payload.get("provider_refund_id")
-        amount_value = None
-        amount_invalid = False
-        if amount_raw is not None:
-            try: amount_value = Decimal(str(amount_raw))
-            except Exception: amount_invalid = True
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            raise HTTPException(400, "invalid webhook body")
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "invalid webhook body")
+
+        try:
+            normalized = map_webhook(payload) if settings.pingpong_mode == "sandbox" else _map_mock_webhook(payload)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, "invalid webhook contract") from exc
+
+        status_value = normalized.status.upper()
+        is_refund = normalized.is_refund
+        tx = normalized.merchant_transaction_id
+        provider_tx = normalized.transaction_id
+        amount_value = normalized.amount
+        currency = normalized.currency
+        request_id = normalized.request_id
+        refund_resource = normalized.merchant_refund_id or normalized.refund_id
         resource = refund_resource if is_refund else (provider_tx or tx)
         event_type = "checkout.refund" if is_refund else "checkout.payment"
-        event_key = f"{event_type}:{resource}:{status_value}"
-        event = WebhookEvent(id=new_id("wh"), provider="pingpong", event_type=event_type, event_key=event_key, resource_id=str(resource) if resource else None, provider_status=status_value or None, amount=amount_value, currency=currency, payload_hash=hashlib.sha256(raw).hexdigest(), delivery_id=request.headers.get("X-Delivery-Id"), status="RECEIVED")
+        provider_event_id = _explicit_provider_event_id(payload)
+        delivery_fingerprint = payload_hash(payload)
+        event = WebhookEvent(id=new_id("wh"), provider="pingpong", event_type=event_type, provider_event_id=provider_event_id, delivery_fingerprint=delivery_fingerprint, resource_id=str(resource) if resource else None, provider_status=status_value or None, amount=amount_value, currency=currency, payload_hash=delivery_fingerprint, delivery_id=request.headers.get("X-Delivery-Id"), status="RECEIVED")
         try:
             db.add(event); db.flush()
         except IntegrityError:
             db.rollback()
             return {"code": 200, "message": "SUCCESS"}
-        if amount_invalid:
+        if amount_value is None:
             event.status = "REJECTED"; event.error = "invalid_amount"; event.processed_at = utcnow(); db.commit()
             return {"code": 200, "message": "SUCCESS"}
         if is_refund:
@@ -126,10 +174,10 @@ def make_router(payment_service: PaymentService, refund_service: RefundService, 
             if not refund:
                 event.status = "REJECTED"; event.error = "unknown refund"; event.processed_at = utcnow(); write_audit(db, actor_id=None, actor_role="system", action="WEBHOOK_REJECTED", resource_type="WebhookEvent", resource_id=event.id, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex, outcome="UNKNOWN_REFUND"); db.commit()
                 return {"code": 200, "message": "SUCCESS"}
-            if (amount_raw is not None and Decimal(str(amount_raw)) != Decimal(refund.amount)) or (currency and currency != refund.currency):
+            if Decimal(amount_value) != Decimal(refund.amount) or (currency and currency != refund.currency):
                 event.status = "REJECTED"; event.error = "amount_or_currency_mismatch"; event.processed_at = utcnow(); write_audit(db, actor_id=None, actor_role="system", action="WEBHOOK_REJECTED", resource_type="WebhookEvent", resource_id=event.id, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex, outcome="AMOUNT_OR_CURRENCY_MISMATCH"); db.commit()
                 return {"code": 200, "message": "SUCCESS"}
-            if status_value not in {"PENDING", "SUCCESS", "FAIL", "CLOSE"}:
+            if status_value not in {"PENDING", "PROCESSING", "SUCCESS", "FAIL", "FAILED", "CLOSE", "CLOSED", "CANCEL"}:
                 event.status = "REJECTED"; event.error = "unknown_provider_status"; event.processed_at = utcnow(); write_audit(db, actor_id=None, actor_role="system", action="WEBHOOK_REJECTED", resource_type="WebhookEvent", resource_id=event.id, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex, outcome="UNKNOWN_PROVIDER_STATUS"); db.commit()
                 return {"code": 200, "message": "SUCCESS"}
             old_refund = refund.status
@@ -142,10 +190,10 @@ def make_router(payment_service: PaymentService, refund_service: RefundService, 
         if not payment:
             event.status = "REJECTED"; event.error = "unknown order"; event.processed_at = utcnow(); write_audit(db, actor_id=None, actor_role="system", action="WEBHOOK_REJECTED", resource_type="WebhookEvent", resource_id=event.id, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex, outcome="UNKNOWN_PAYMENT"); db.commit()
             return {"code": 200, "message": "SUCCESS"}
-        if (amount_raw is not None and Decimal(str(amount_raw)) != Decimal(payment.amount)) or (currency and currency != payment.currency):
+        if Decimal(amount_value) != Decimal(payment.amount) or (currency and currency != payment.currency):
             event.status = "REJECTED"; event.error = "amount_or_currency_mismatch"; event.processed_at = utcnow(); write_audit(db, actor_id=None, actor_role="system", action="WEBHOOK_REJECTED", resource_type="WebhookEvent", resource_id=event.id, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex, outcome="AMOUNT_OR_CURRENCY_MISMATCH"); db.commit()
             return {"code": 200, "message": "SUCCESS"}
-        if status_value not in {"PENDING", "SUCCESS", "FAIL", "CLOSE", "AUTH_SUCCESS"}:
+        if status_value not in {"INIT", "PENDING", "PROCESSING", "SUCCESS", "FAIL", "FAILED", "CLOSE", "CLOSED", "CANCEL", "AUTH_SUCCESS"}:
             event.status = "REJECTED"; event.error = "unknown_provider_status"; event.processed_at = utcnow(); write_audit(db, actor_id=None, actor_role="system", action="WEBHOOK_REJECTED", resource_type="WebhookEvent", resource_id=event.id, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex, outcome="UNKNOWN_PROVIDER_STATUS"); db.commit()
             return {"code": 200, "message": "SUCCESS"}
         result = ProviderPaymentResult(provider_transaction_id=provider_tx, provider_request_id=str(request_id or payment.provider_request_id), provider_status=status_value, next_action=NextAction("NONE"))
@@ -198,7 +246,7 @@ def make_router(payment_service: PaymentService, refund_service: RefundService, 
     @router.get("/admin/webhooks")
     def webhook_events(principal: Principal = Depends(require_role("admin", "fde")), db: Session = Depends(get_db)):
         rows = db.query(WebhookEvent).order_by(WebhookEvent.received_at.desc()).limit(100).all()
-        return [{"event_type": x.event_type, "event_key": x.event_key, "resource_id": x.resource_id, "provider_status": x.provider_status, "amount": str(x.amount) if x.amount is not None else None, "currency": x.currency, "payload_hash": x.payload_hash, "delivery_id": x.delivery_id, "status": x.status, "error": x.error, "received_at": x.received_at, "processed_at": x.processed_at} for x in rows]
+        return [{"event_type": x.event_type, "provider_event_id": x.provider_event_id, "delivery_fingerprint": x.delivery_fingerprint, "resource_id": x.resource_id, "provider_status": x.provider_status, "amount": str(x.amount) if x.amount is not None else None, "currency": x.currency, "payload_hash": x.payload_hash, "delivery_id": x.delivery_id, "status": x.status, "error": x.error, "received_at": x.received_at, "processed_at": x.processed_at} for x in rows]
 
     @router.get("/admin/reconciliation")
     def reconciliation_view(principal: Principal = Depends(require_role("admin", "fde")), db: Session = Depends(get_db)):
@@ -207,15 +255,27 @@ def make_router(payment_service: PaymentService, refund_service: RefundService, 
 
     @router.post("/vcc/agent")
     def vcc_agent(body: VCCAgentRequest, request: Request, principal: Principal = Depends(require_role("finance", "admin")), db: Session = Depends(get_db)):
-        parsed = parse_payment_request(body.message)
+        if is_unsafe_request(body.message):
+            parsed = unsafe_request()
+        else:
+            try:
+                # The parser is untrusted input processing. Any LLM/network/
+                # schema failure fails closed into clarification.
+                parsed = intent_parser.parse(body.message)
+            except Exception:
+                parsed = PaymentRequest(vendor="UNKNOWN", amount="", currency="", purpose="", period_days=30, missing_fields=["request"])
         data = parsed.model_dump()
-        if parsed.missing_fields: return {"parsed": data, "budget": None, "approval": None, "application_id": None}
+        clarification_question = _clarification_question(parsed)
+        if parsed.rejection_reason:
+            return {"parsed": data, "budget": None, "approval": None, "application_id": None, "clarification_question": None, "status": "REJECTED_UNSAFE_REQUEST"}
+        if parsed.missing_fields:
+            return {"parsed": data, "budget": None, "approval": None, "application_id": None, "clarification_question": clarification_question, "status": "NEEDS_CLARIFICATION"}
         amount = Decimal(parsed.amount)
         budget = budget_tool(amount)
         approval = approval_tool(amount)
-        if not budget["passed"]: return {"parsed": data, "budget": budget, "approval": approval, "application_id": None, "status": "REJECTED_BUDGET"}
+        if not budget["passed"]: return {"parsed": data, "budget": budget, "approval": approval, "application_id": None, "clarification_question": None, "status": "REJECTED_BUDGET"}
         app = ApprovalService.create_application(db, requester_id=principal.actor_id, vendor=parsed.vendor, purpose=parsed.purpose, amount=amount, currency=parsed.currency, period_days=parsed.period_days, trace_id=request.headers.get("X-Trace-Id") or uuid.uuid4().hex)
-        return {"parsed": data, "budget": budget, "approval": approval, "application_id": app.id, "status": app.status}
+        return {"parsed": data, "budget": budget, "approval": approval, "application_id": app.id, "clarification_question": None, "status": app.status}
 
     @router.post("/vcc/{application_id}/approve")
     def approve_vcc(application_id: str, body: VCCApproveRequest, request: Request, principal: Principal = Depends(require_role("approver", "admin")), db: Session = Depends(get_db)):

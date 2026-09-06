@@ -1,12 +1,14 @@
 **# SPEC.md — AI Platform Global Payment Integration（PingPong FDE POC）**
 
-\> 版本：v1.2  
+\> 版本：v1.3
 
 \> 状态：Ready for Implementation  
 
 \> 语言：中文优先，关键技术名词保留英文  
 
 \> 目标读者：本地 Coding Agent / 面试官 / FDE / 开发者
+
+变更记录（v1.3，2026-09-06）：补充当前可读取的官方 Checkout V4 envelope/endpoint/signature 来源；将本地 Ledger 语义限定为事务边界内的 idempotent business effect；明确无官方 event ID 时使用 `delivery_fingerprint`；VCC 统一称为 `VCC Workflow Assistant`，支持 deterministic parser 和可选 LLM structured parser。
 
 \---
 
@@ -770,23 +772,21 @@ payment.transition\_to(...)
 
 优先参考当前 PingPong 官方 Checkout V4 文档。
 
-当前公开接口包括：
+本次复核的可读取官方 Checkout V4 developer guide 当前公开接口包括：
 
 \`\`\`text
 
-POST /api/acq/v4/payments/create
+POST /v4/payment/prePay
 
-POST /api/acq/v4/payments/query
+POST /v4/payment/query
 
-POST /api/acq/v4/payments/capture
+POST /v4/payment/refund
 
-POST /api/acq/v4/payments/cancel
-
-POST /api/acq/v4/refunds/create
-
-POST /api/acq/v4/refunds/query
+POST /v4/payment/getRefund
 
 \`\`\`
+
+说明：Prompt 初始资料中的 `/api/acq/v4/...` 路径未能从当前可读取的公开页面取得完整契约；本项目不将两套路径混写，具体证据与未确认项见 `docs/adr/ADR-001-pingpong-checkout-v4-contract.md`。
 
 官方文档导航还列出 Create Session，但在未取得 Sandbox 测试账户和已开通产品的精确契约前，不得假定其 endpoint、字段或返回 URL。
 
@@ -808,7 +808,7 @@ Create Payment 应使用：
 
 \- \`request\_id\`：请求幂等 ID
 
-Create Payment 的客户后续操作应读取官方响应中的 action 并映射为本地 next\_action；不得假定响应一定含 checkout\_url。若账户启用 Hosted / Session 流程，必须以该账户对应官方资料确认的契约实现。
+本 POC 使用 Hosted `prePay`。客户后续操作应读取官方响应中的 `paymentUrl` 并映射为本地 `next_action=REDIRECT`；不得假定响应一定含 `checkout_url`。API-only `unifiedPay` 是独立的卡数据/PCI 路径，不属于本 POC。
 
 P0 不得向 PingPong 发送 PAN、CVV 或由本 POC 收集的卡信息。payment\_method 的可用取值、客户动作和 Sandbox 测试数据必须以已开通产品的官方资料为准。
 
@@ -828,7 +828,7 @@ PINGPONG\_MODE=mock|sandbox
 
 \`\`\`
 
-PINGPONG\_MODE 必须显式配置，禁止自动 fallback。Sandbox 模式启动时必须校验对应的 base URL、appId、appSecret / token、签名所需配置和 HTTPS notify URL；缺失任一必需项必须 fail fast，且错误信息不得包含 Secret。
+PINGPONG\_MODE 必须显式配置，禁止自动 fallback。Sandbox 模式启动时必须校验对应的 base URL、`accId`、`clientId`、salt、Hosted 支付结果/取消地址、HTTPS notify URL 和 shopper IP；缺失任一必需项必须 fail fast，且错误信息不得包含 Secret。
 
 **### mock**
 
@@ -994,7 +994,7 @@ README 中应明确说明该设计决定。
 
 \`\`\`
 
-VCC Agent：
+VCC Workflow Assistant（当前实现为 deterministic fallback + 可选 LLM structured parser；不宣称自主 LLM Agent）：
 
 \`\`\`text
 
@@ -1732,7 +1732,7 @@ next\_action 可以为 REDIRECT、QR\_CODE 或 NONE。URL 属于一次性客户�
 
 7\. 临时数据库故障返回 5xx，以便 Provider 重试。
 
-8\. Handler 只做必要工作，不执行长耗时 LLM 调用。
+8\. Handler 只做必要工作；可选 LLM 调用必须有明确 timeout，失败时进入 `NEEDS_CLARIFICATION`，不得阻塞或改变资金流程。
 
 Mock 模式允许：
 
@@ -1786,7 +1786,7 @@ Idempotency-Key: \<client generated key>
 
 \---
 
-**## 14.6 VCC Agent**
+**## 14.6 VCC Workflow Assistant（原需求称 VCC Agent）**
 
 **### POST /api/vcc/agent**
 
@@ -2090,7 +2090,7 @@ MANUAL\_REVIEW
 
 \---
 
-**# 19. VCC Agent 业务规则**
+**# 19. VCC Workflow Assistant 业务规则**
 
 POC 规则，不代表 PingPong 官方风控规则。
 
@@ -2210,7 +2210,7 @@ UI 不是项目重点，保持最小化。
 
 \- errors
 
-**## VCC Agent**
+**## VCC Workflow Assistant**
 
 \- Chat / Input
 
@@ -2696,7 +2696,7 @@ README 不允许只写“如何启动”。
 
 \- Reconciliation Sequence
 
-\- VCC Agent Sequence
+\- VCC Workflow Assistant Sequence
 
 Mermaid 优先。
 
@@ -2964,7 +2964,7 @@ Coding Agent 必须遵守：
 
 12\. FDE Docs
 
-13\. VCC Agent
+13\. VCC Workflow Assistant
 
 \`\`\`
 
@@ -3100,7 +3100,7 @@ Acceptance：
 
 \- Create Payment Response 必须作为可信 Provider Observation 进入统一 State Machine
 
-\- PENDING → PROCESSING；SUCCESS → SUCCEEDED + TOPUP Ledger exactly once；AUTH\_SUCCESS / FAIL / CLOSE 按统一映射处理
+\- PENDING/PROCESSING → PROCESSING；SUCCESS → SUCCEEDED + TOPUP Ledger 在本地事务边界内产生一次业务效果；AUTH\_SUCCESS / FAILED / FAIL / CANCEL / CLOSED / CLOSE 按统一映射处理
 
 \- 不允许存在“Create Response 直接改余额”的旁路逻辑
 
@@ -3342,7 +3342,7 @@ README 最后需要提供一个 10 分钟 Demo Script。
 
 \- 展示 trace\_id
 
-**## 2 分钟：VCC Agent**
+**## 2 分钟：VCC Workflow Assistant**
 
 \- 输入 AWS 账单
 
@@ -3364,7 +3364,7 @@ README 最后需要提供一个 10 分钟 Demo Script。
 
 如果真实完成 Sandbox Checkout 联调：
 
-\> **\*\*跨境支付 API 集成 POC｜PingPong Checkout / VCC\*\***：基于 PingPong Sandbox 完成 Checkout API 联调，覆盖支付创建、交易查询、Webhook、退款、幂等及异常补偿；设计 VCC Agent 用卡流程，并沉淀开发者接入与上线验收文档。
+\> **\*\*跨境支付 API 集成 POC｜PingPong Checkout / VCC\*\***：仅在确有真实 Sandbox 证据时，才可描述为基于 PingPong Sandbox 完成 Checkout API 联调；当前实现应描述为基于公开 Contract fixture/MockTransport 的 Checkout 适配、状态机、Webhook、退款、幂等及异常补偿，并实现带可选 LLM 意图解析的 VCC Workflow Assistant，用卡流程仍为 Mock。
 
 仅当确实完成对应能力后，才允许使用上述描述。
 

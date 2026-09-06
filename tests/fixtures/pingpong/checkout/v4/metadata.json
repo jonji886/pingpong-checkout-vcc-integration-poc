@@ -1,0 +1,19 @@
+{
+  "source_urls": [
+    "https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/reserve/",
+    "https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/getOne/",
+    "https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/modifications/refund/",
+    "https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/getRefund/",
+    "https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/notify/payment/notify/",
+    "https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/notify/refundNotify/"
+  ],
+  "api_version": "Checkout V4",
+  "reviewed_at": "2026-09-06",
+  "fixture_type": "public-documentation-example-minimized",
+  "modified_fields": [
+    "accId and clientId replaced with REDACTED placeholders",
+    "sign replaced with REDACTED_SIGNATURE because this fixture is not a live signature vector",
+    "card/customer/PII fields removed",
+    "merchant identifiers normalized to PMT-DEMO/RFN-DEMO values"
+  ]
+}

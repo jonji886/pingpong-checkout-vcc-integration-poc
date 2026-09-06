@@ -129,11 +129,19 @@ class RefundOrder(Base):
 
 class WebhookEvent(Base):
     __tablename__ = "webhook_events"
-    __table_args__ = (UniqueConstraint("event_key", name="uq_webhook_event_key"),)
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_event_id", name="uq_webhook_provider_event"),
+        UniqueConstraint("provider", "delivery_fingerprint", name="uq_webhook_delivery_fingerprint"),
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     provider: Mapped[str] = mapped_column(String(32), default="pingpong")
     event_type: Mapped[str] = mapped_column(String(64))
-    event_key: Mapped[str] = mapped_column(String(255))
+    # PingPong's public notification contract does not document a stable
+    # event/delivery ID. This field is only populated if a future verified
+    # contract supplies one; it is never synthesized from status/resource.
+    provider_event_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    # Local duplicate-delivery guard; not a provider event ID.
+    delivery_fingerprint: Mapped[str] = mapped_column(String(128))
     resource_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     provider_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
@@ -189,4 +197,3 @@ class VCCApplication(Base):
     masked_card: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-

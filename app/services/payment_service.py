@@ -30,10 +30,9 @@ class ForbiddenError(ValueError):
 
 
 class PaymentService:
-    def __init__(self, provider: CheckoutProvider):
+    def __init__(self, provider: CheckoutProvider, *, retry_policy: Optional[RetryPolicy] = None):
         self.provider = provider
-        # Tests can inject a provider sequence without waiting; real adapters use bounded backoff.
-        self.retry_policy = RetryPolicy(sleep=lambda _seconds: None)
+        self.retry_policy = retry_policy or RetryPolicy()
 
     @staticmethod
     def validate_amount(amount: Any) -> Decimal:
@@ -65,7 +64,7 @@ class PaymentService:
             # and can recover a one-time next_action without persisting it.
             if existing.status == "IN_PROGRESS" and payment.status in {"CREATED", "PROCESSING"}:
                 try:
-                    result = self.retry_policy.run(lambda: self.provider.create_payment(partner_transaction_id=payment.partner_transaction_id, provider_request_id=payment.provider_request_id, amount=Decimal(payment.amount), currency=payment.currency, user_id=payment.user_id, notify_url=settings.pingpong_notify_url or None))
+                    result = self.retry_policy.run(lambda: self.provider.create_payment(partner_transaction_id=payment.partner_transaction_id, provider_request_id=payment.provider_request_id, amount=Decimal(payment.amount), currency=payment.currency, user_id=payment.user_id, notify_url=settings.pingpong_notify_url or None), operation_name="create_payment_replay", request_id=payment.provider_request_id)
                     next_action = {"type": result.next_action.type}
                     if result.next_action.url: next_action["url"] = result.next_action.url
                     if result.next_action.qr_payload: next_action["qr_payload"] = result.next_action.qr_payload
@@ -99,7 +98,7 @@ class PaymentService:
 
         started = time.monotonic()
         try:
-            result = self.retry_policy.run(lambda: self.provider.create_payment(partner_transaction_id=partner_id, provider_request_id=provider_request_id, amount=value, currency="USD", user_id=actor_id, notify_url=settings.pingpong_notify_url or None))
+            result = self.retry_policy.run(lambda: self.provider.create_payment(partner_transaction_id=partner_id, provider_request_id=provider_request_id, amount=value, currency="USD", user_id=actor_id, notify_url=settings.pingpong_notify_url or None), operation_name="create_payment", request_id=provider_request_id)
             write_provider_log(db, provider="pingpong", operation="create_payment", trace_id=trace_id, provider_request_id=result.provider_request_id, http_status=result.http_status, provider_code=result.provider_code, latency_ms=int((time.monotonic() - started) * 1000), success=True)
             next_action = {"type": result.next_action.type}
             if result.next_action.url: next_action["url"] = result.next_action.url
@@ -128,7 +127,11 @@ class PaymentService:
         if not payment: raise NotFoundError("payment not found")
         old = payment.status
         target = transition(old, result.provider_status)
-        payment.provider_status = result.provider_status
+        # A terminal local state is monotonic. Keep the last terminal provider
+        # status when an older webhook arrives, so reconciliation views cannot
+        # be made stale by a late PROCESSING/PENDING observation.
+        if old not in {PaymentStatus.SUCCEEDED.value, PaymentStatus.FAILED.value, PaymentStatus.CANCELLED.value, PaymentStatus.REVIEW_REQUIRED.value}:
+            payment.provider_status = result.provider_status
         payment.provider_transaction_id = result.provider_transaction_id or payment.provider_transaction_id
         if result.failure_code: payment.failure_code = result.failure_code
         if result.failure_message: payment.failure_message = result.failure_message[:255]
@@ -149,9 +152,10 @@ class PaymentService:
             raise ForbiddenError("FDE/Admin role required")
         started = time.monotonic()
         try:
-            result = self.retry_policy.run(lambda: self.provider.query_payment(partner_transaction_id=payment.partner_transaction_id, provider_request_id=payment.provider_request_id), retry_on_timeout=True)
+            result = self.retry_policy.run(lambda: self.provider.query_payment(partner_transaction_id=payment.partner_transaction_id, provider_request_id=payment.provider_request_id), retry_on_timeout=True, operation_name="query_payment", request_id=payment.provider_request_id)
             write_provider_log(db, provider="pingpong", operation="query_payment", trace_id=trace_id, provider_request_id=result.provider_request_id, http_status=result.http_status, provider_code=result.provider_code, latency_ms=int((time.monotonic() - started) * 1000), success=True)
             self.apply_observation(db, payment_id=payment_id, result=result, trace_id=trace_id, source="reconcile")
+            payment = db.get(PaymentOrder, payment_id)
             payment.reconcile_attempts += 1
             payment.updated_at = utcnow()
             write_audit(db, actor_id=actor_id, actor_role=actor_role, action="RECONCILE_PAYMENT", resource_type="PaymentOrder", resource_id=payment_id, trace_id=trace_id, outcome="SUCCESS")

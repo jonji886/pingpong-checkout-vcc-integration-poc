@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from .agents.finance_agent import VCCIntentParser, build_configured_intent_parser
 from .config import settings
 from .db import init_db, SessionLocal
 from .integrations.pingpong.checkout import PingPongSandboxCheckoutAdapter
 from .integrations.pingpong.issuing import MockPingPongIssuingAdapter
 from .integrations.pingpong.mock_checkout import MockPingPongCheckoutAdapter
+from .integrations.pingpong.retry import NoOpSleeper, RetryPolicy
 from .models import User
 from .api.routes import make_router
 from .services.common import new_id
@@ -33,7 +35,7 @@ def _seed_demo_users() -> None:
         db.close()
 
 
-def create_app(*, provider=None, issuing_provider=None, initialize: bool = True) -> FastAPI:
+def create_app(*, provider=None, issuing_provider=None, intent_parser: VCCIntentParser | None = None, initialize: bool = True) -> FastAPI:
     app = FastAPI(title="DemoAI PingPong FDE POC", version="0.1.0")
     if provider is None:
         if settings.pingpong_mode == "sandbox":
@@ -43,10 +45,11 @@ def create_app(*, provider=None, issuing_provider=None, initialize: bool = True)
         else:
             provider = _UnconfiguredProvider()
     issuing_provider = issuing_provider or MockPingPongIssuingAdapter()
-    payment_service = PaymentService(provider)
-    refund_service = RefundService(provider)
+    retry_policy = RetryPolicy(sleeper=NoOpSleeper()) if settings.pingpong_mode == "mock" else RetryPolicy()
+    payment_service = PaymentService(provider, retry_policy=retry_policy)
+    refund_service = RefundService(provider, retry_policy=retry_policy)
     issuing_service = IssuingService(issuing_provider)
-    app.include_router(make_router(payment_service, refund_service, issuing_service))
+    app.include_router(make_router(payment_service, refund_service, issuing_service, intent_parser=intent_parser))
     app.include_router(ui_router)
 
     @app.on_event("startup")
@@ -64,4 +67,4 @@ def create_app(*, provider=None, issuing_provider=None, initialize: bool = True)
     return app
 
 
-app = create_app()
+app = create_app(intent_parser=build_configured_intent_parser())

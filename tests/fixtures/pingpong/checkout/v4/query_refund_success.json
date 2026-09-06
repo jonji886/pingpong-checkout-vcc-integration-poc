@@ -1,0 +1,19 @@
+{
+  "accId": "REDACTED_ACC_ID",
+  "bizContent": {
+    "amount": "100.000000",
+    "transactionId": "2023062150000329",
+    "merchantTransactionId": "PMT-DEMO-001",
+    "currency": "USD",
+    "merchantRefundId": "RFN-DEMO-001",
+    "refundId": "2023062150000330",
+    "resultCode": "000000",
+    "resultDescription": "Transaction succeeded",
+    "status": "SUCCESS"
+  },
+  "clientId": "REDACTED_CLIENT_ID",
+  "code": "001000",
+  "description": "Successful request",
+  "sign": "REDACTED_SIGNATURE",
+  "signType": "SHA256"
+}

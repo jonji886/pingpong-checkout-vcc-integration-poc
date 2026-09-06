@@ -17,9 +17,9 @@ from .payment_service import ConflictError, NotFoundError
 
 
 class RefundService:
-    def __init__(self, provider: CheckoutProvider):
+    def __init__(self, provider: CheckoutProvider, *, retry_policy: RetryPolicy | None = None):
         self.provider = provider
-        self.retry_policy = RetryPolicy(sleep=lambda _seconds: None)
+        self.retry_policy = retry_policy or RetryPolicy()
 
     def create_refund(self, db: Session, *, actor_id: str, actor_role: str, payment_id: str, idem_key: str, trace_id: str) -> RefundOrder:
         if not idem_key: raise ValueError("Idempotency-Key is required")
@@ -34,7 +34,7 @@ class RefundService:
         payment = db.get(PaymentOrder, payment_id)
         if not payment: raise NotFoundError("payment not found")
         if payment.status != "SUCCEEDED": raise ValueError("payment is not refundable")
-        if db.query(RefundOrder).filter_by(payment_id=payment_id).first(): raise ValueError("payment already has a refund")
+        if db.query(RefundOrder).filter_by(payment_id=payment_id).first(): raise ConflictError("payment already has a refund")
         refund_id = new_id("refund")
         partner_refund_id = "rfn_" + refund_id
         provider_request_id = "req_" + refund_id
@@ -61,7 +61,7 @@ class RefundService:
             return db.get(RefundOrder, existing.resource_id)
         started = time.monotonic()
         try:
-            result = self.retry_policy.run(lambda: self.provider.create_refund(partner_refund_id=partner_refund_id, provider_request_id=provider_request_id, partner_transaction_id=payment.partner_transaction_id, amount=Decimal(payment.amount), currency=payment.currency))
+            result = self.retry_policy.run(lambda: self.provider.create_refund(partner_refund_id=partner_refund_id, provider_request_id=provider_request_id, partner_transaction_id=payment.partner_transaction_id, amount=Decimal(payment.amount), currency=payment.currency), operation_name="create_refund", request_id=provider_request_id)
             write_provider_log(db, provider="pingpong", operation="create_refund", trace_id=trace_id, provider_request_id=result.provider_request_id, http_status=result.http_status, provider_code=result.provider_code, latency_ms=int((time.monotonic()-started)*1000), success=True)
             self.apply_observation(db, refund_id=refund_id, result=result, trace_id=trace_id)
             idem = db.get(ApiIdempotency, idem.id)
@@ -91,7 +91,7 @@ class RefundService:
             refund.status = transition_refund(refund.status, "SUCCEEDED")
             hold = db.query(CreditHold).filter_by(id=refund.credit_hold_id).one()
             CreditService.settle_hold(db, hold, refund_id=refund.id, amount=Decimal(refund.amount))
-        elif status in {"FAIL", "CLOSE"}:
+        elif status in {"FAIL", "FAILED", "CLOSE", "CLOSED", "CANCEL"}:
             refund.status = transition_refund(refund.status, "FAILED")
             hold = db.query(CreditHold).filter_by(id=refund.credit_hold_id).one()
             CreditService.release_hold(db, hold)
@@ -103,7 +103,10 @@ class RefundService:
     def query_refund(self, db: Session, *, refund_id: str, actor_id: str, actor_role: str, trace_id: str) -> RefundOrder:
         refund = db.get(RefundOrder, refund_id)
         if not refund: raise NotFoundError("refund not found")
-        result = self.provider.query_refund(partner_refund_id=refund.partner_refund_id, provider_request_id=refund.provider_request_id)
+        payment = db.get(PaymentOrder, refund.payment_id)
+        if not payment:
+            raise NotFoundError("payment not found")
+        result = self.retry_policy.run(lambda: self.provider.query_refund(partner_refund_id=refund.partner_refund_id, partner_transaction_id=payment.partner_transaction_id, provider_request_id=refund.provider_request_id), retry_on_timeout=True, operation_name="query_refund", request_id=refund.provider_request_id)
         self.apply_observation(db, refund_id=refund_id, result=result, trace_id=trace_id)
         db.commit()
         return db.get(RefundOrder, refund_id)

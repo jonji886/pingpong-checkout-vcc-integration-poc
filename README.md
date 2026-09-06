@@ -1,5 +1,7 @@
 # PingPong Checkout / VCC 集成 POC
 
+[![tests](https://github.com/jonji886/pingpong-checkout-vcc-integration-poc/actions/workflows/ci.yml/badge.svg)](https://github.com/jonji886/pingpong-checkout-vcc-integration-poc/actions/workflows/ci.yml)
+
 > 基于 PingPong Checkout 公开资料和虚构客户 DemoAI 场景构建；当前为 **Mock Verified / Sandbox Pending**，不代表 PingPong 官方项目、真实客户案例或真实 Sandbox 联调经验。
 
 ## 项目定位
@@ -7,7 +9,7 @@
 模拟一个 AI 平台接入跨境支付和虚拟卡能力的端到端 POC：
 
 - 收款侧：Payment 创建、Query、Webhook、幂等、状态机、主动查单、退款和 Credits Ledger。
-- 支出侧：VCC Agent 自然语言解析、预算校验、RBAC、人工审批、开卡和审计。
+- 支出侧：VCC Workflow Assistant（可选 LLM 意图解析 + deterministic fallback）、预算校验、RBAC、人工审批、Mock 开卡和审计。
 - 工程侧：Provider Adapter 隔离、失败路径、429/timeout、Webhook 重复与乱序、敏感字段脱敏。
 
 本项目不处理真实资金，不采集或发送 PAN/CVV，不包含真实生产凭证，也不将 Mock 结果描述为 Sandbox 验证。
@@ -19,11 +21,11 @@ FastAPI API
     ↓
 Application Services
     ↓
-Domain State Machine + Exactly-once Ledger
+Domain State Machine + Idempotent Ledger
     ↓
 Provider Ports
     ├── Mock Checkout / Issuing Adapter
-    └── Sandbox Checkout HTTP Adapter（契约待确认）
+    └── Sandbox Checkout HTTP Adapter（Hosted prePay / Query / Refund）
 ```
 
 SQLite 用于本地单实例演示。金额使用 `Decimal/Numeric`；Create Response、已验签 Webhook 和 Query/Reconciliation Observation 统一进入状态机，Credits 只通过 Ledger 入账。
@@ -33,8 +35,9 @@ SQLite 用于本地单实例演示。金额使用 `Decimal/Numeric`；Create Res
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | Checkout Mock | `MOCK_VERIFIED` | 本地 Mock、单元测试和 HTTP E2E 已覆盖 |
-| Checkout Sandbox | `SANDBOX_PENDING` | 没有账户凭证、产品权限和公网 callback，未进行真实调用 |
-| VCC Issuing | `MOCK_ONLY` | 当前使用 Mock Issuing Adapter，不代表真实发卡能力 |
+| Checkout public Contract | `CONTRACT_VERIFIED` | 官方公开 V4 fixture、DTO/Mapper 和 MockTransport 已覆盖；不等于真实 API 调用 |
+| Checkout Sandbox | `SANDBOX_PENDING` | 已对公用网关和 API-only `unifiedPay` 做过外部烟测；该账号返回 `500008`（无可用 subChannel）并确认为 `FAILED`。项目 Adapter 走 Hosted `prePay`，尚未完成成功支付、回调和退款全链路 |
+| VCC Issuing / Workflow Assistant | `MOCK_ONLY` | 可选 LLM 仅做结构化提取；预算、RBAC、审批和开卡仍由后端确定性控制，不代表真实发卡 |
 
 ## 快速运行（Mock）
 
@@ -68,7 +71,7 @@ bash scripts/demo.sh
 - `/ui/developer`：充值、Payment History、模拟成功 Webhook。
 - `/ui/finance`：交易查询和退款。
 - `/ui/fde`：主动查单、Provider Calls、Webhook Events、Audit Log。
-- `/ui/vcc`：VCC Agent、预算检查、人工审批和 Mock 开卡。
+- `/ui/vcc`：VCC Workflow Assistant、预算检查、人工审批和 Mock 开卡。
 - `/docs`：Swagger API 文档。
 
 ## Mock 演示流程
@@ -103,15 +106,18 @@ Mock HMAC secret `local-demo-secret` 同样只是公开的本地演示值。生�
 
 ## Sandbox 边界
 
-必须显式设置 `PINGPONG_MODE=mock|sandbox`，不会从 Sandbox 静默降级。Sandbox 模式启动时要求 base URL、凭证和 HTTPS notify URL；缺少配置会直接失败。
+必须显式设置 `PINGPONG_MODE=mock|sandbox`，不会从 Sandbox 静默降级。Sandbox 模式启动时要求 base URL、`accId/clientId/salt`、HTTPS 通知/回跳地址和 shopper IP；缺少配置或使用示例保留域名会直接失败。
 
-仓库中的 Sandbox HTTP Adapter 目前是隔离第三方依赖的原型，真实账户的 endpoint、字段、鉴权、签名、支付动作和状态枚举仍需按当前官方文档及商户账户契约确认。它不代表可以直接完成真实 Sandbox 联调，因此本仓库状态保持为 `SANDBOX_PENDING`。
+仓库中的 Sandbox HTTP Adapter 使用官方 V4 Hosted `prePay`，只创建支付订单并返回 Hosted `paymentUrl`，不接收、不发送 PAN/CVV；支付完成后由 Webhook 或 Query 进入本地状态机。API-only `unifiedPay` 是另一条需要卡数据/PCI 约束的路径，不属于本 POC。仅填入 `accId`、`clientId`、salt 仍不足以完成真实联调，还需要商户可访问的 HTTPS 通知、支付结果/取消地址、有效 shopper IP，以及已开通的 Hosted 产品权限；本仓库状态保持为 `SANDBOX_PENDING`。契约边界见 [ADR-001](docs/adr/ADR-001-pingpong-checkout-v4-contract.md)。
 
 参考官方资料：
 
 - [PingPong Checkout V4 API overview](https://docs.pingpongx.com/api/acq/create-a-payment?version=v4)
 - [Checkout V4 endpoint guide](https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/guide/endpoint/)
+- [Checkout V4 Hosted prePay](https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/reserve/)
+- [Checkout V4 API-only unifiedPay](https://acquirer-api-docs-v4-en.pingpongx.com/en/notes/checkout/api/uniformly/)
 - [Checkout V4 API usage and signature rules](https://acquirer-api-docs-v4.pingpongx.com/en/notes/guide/APIUsage/)
+- [Checkout V4 signature convention](https://acquirer-api-docs-v4.pingpongx.com/en/notes/guide/sign/)
 
 ## 测试
 
@@ -126,7 +132,11 @@ PINGPONG_MODE=mock PINGPONG_WEBHOOK_SECRET=local-demo-secret python3 -m pytest -
 
 ## 文档
 
-`docs/` 包含客户场景、需求分析、方案设计、API 接入指南、支付状态机、Webhook 设计、VCC Agent 设计、排障手册、测试计划和 Go-live Checklist。
+`docs/` 包含客户场景、需求分析、方案设计、API 接入指南、支付状态机、Webhook 设计、VCC Workflow Assistant 设计、排障手册、测试计划和 Go-live Checklist。
+
+`docs/adr/ADR-001-pingpong-checkout-v4-contract.md` 记录当前官方公开契约、已验证字段和 Sandbox Pending 边界。
+
+VCC 自然语言解析默认可保持 deterministic；若配置 `LLM_ENABLED=true`，生产 ASGI app 使用 DeepSeek JSON Output 生成结构化申请。LLM 失败、超时或输出不合法时只返回 `NEEDS_CLARIFICATION`，不会触发预算、审批或开卡旁路。
 
 ## 仓库安全
 

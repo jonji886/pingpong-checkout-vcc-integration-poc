@@ -1,0 +1,19 @@
+{
+  "accId": "REDACTED_ACC_ID",
+  "bizContent": {
+    "amount": "100.000000",
+    "transactionTime": "1714978654000",
+    "transactionEndTime": "1714978655669",
+    "merchantTransactionId": "PMT-DEMO-001",
+    "transactionId": "2024050650046394",
+    "notifyType": "RECHARGE",
+    "currency": "USD",
+    "threeDSecure": "N",
+    "status": "SUCCESS"
+  },
+  "clientId": "REDACTED_CLIENT_ID",
+  "code": "000000",
+  "description": "Transaction succeeded",
+  "sign": "REDACTED_SIGNATURE",
+  "signType": "SHA256"
+}

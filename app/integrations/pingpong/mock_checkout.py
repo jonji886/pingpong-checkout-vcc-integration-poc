@@ -57,7 +57,7 @@ class MockPingPongCheckoutAdapter:
         self.refunds[partner_refund_id] = result
         return result
 
-    def query_refund(self, *, partner_refund_id, provider_request_id):
+    def query_refund(self, *, partner_refund_id, partner_transaction_id, provider_request_id):
         return self.refunds.get(partner_refund_id) or ProviderRefundResult("mock_rf_" + partner_refund_id, provider_request_id, "SUCCESS", http_status=200)
 
     def set_payment_status(self, partner_transaction_id: str, status: str) -> None:

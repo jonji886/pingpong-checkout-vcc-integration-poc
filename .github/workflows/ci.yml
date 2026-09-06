@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    env:
+      PINGPONG_MODE: mock
+      PINGPONG_WEBHOOK_SECRET: local-demo-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project and test dependencies
+        run: python -m pip install -e '.[test]'
+      - name: Run tests
+        run: python -m pytest -q

@@ -13,10 +13,15 @@ class PaymentStatus(str, Enum):
 
 
 PROVIDER_TO_PAYMENT = {
+    "INIT": PaymentStatus.CREATED,
     "PENDING": PaymentStatus.PROCESSING,
+    "PROCESSING": PaymentStatus.PROCESSING,
     "SUCCESS": PaymentStatus.SUCCEEDED,
     "FAIL": PaymentStatus.FAILED,
+    "FAILED": PaymentStatus.FAILED,
     "CLOSE": PaymentStatus.CANCELLED,
+    "CANCEL": PaymentStatus.CANCELLED,
+    "CLOSED": PaymentStatus.CANCELLED,
     "AUTH_SUCCESS": PaymentStatus.REVIEW_REQUIRED,
 }
 
