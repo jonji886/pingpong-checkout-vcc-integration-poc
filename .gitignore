@@ -1,0 +1,22 @@
+.env
+.env.*
+!.env.example
+
+*.db
+*.sqlite
+*.sqlite3
+
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+*.py[cod]
+
+.DS_Store
+
+# Local agent instructions; keep out of the public repository.
+AGENTS.md
