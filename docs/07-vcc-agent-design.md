@@ -24,6 +24,21 @@ AuditLog
 
 Parser 只提取 `vendor`、`amount`、`currency`、`purpose`、`period_days`。缺失金额/币种时返回 `missing_fields`，不猜业务金额；金额、币种、预算、审批和当前状态由后端重新校验。LLM 输出使用 JSON mode 并经过 Pydantic 和 Decimal/币种/期限校验。
 
+## Clarification and Scope UX
+
+VCC 输入采用有边界的多轮澄清，而不是无限对话：
+
+```text
+接收输入 → 判断意图 → 补齐 vendor / amount / currency / purpose，并确认 period
+→ 用户确认结构化参数 → Budget / RBAC / Approval → Human Confirmation → Create VCC
+```
+
+- `NEEDS_CLARIFICATION` 只展示已识别字段和缺失字段，不创建 `VCCApplication`，也不执行 Budget / Approval。
+- 前端会保留本轮用户补充，并将用户消息合并后重新解析；最多由用户继续补充到字段完整。
+- 空值不展示为 `UNKNOWN`、`0.00` 或业务默认值；状态显示为“未识别”“待补充”或“未执行”。
+- 不属于 VCC 申请的请求返回 `OUT_OF_SCOPE`，明确支持范围和可用示例；绕过审批、修改安全规则或要求敏感卡数据时返回安全拒绝。
+- 只有结构化申请完整且通过后端确定性校验后，才创建 Application。
+
 ## Security Invariants
 
 - Parser 不能决定最终预算、RBAC 或审批结果。

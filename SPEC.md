@@ -6,7 +6,7 @@
 
 \> 语言：中文优先，关键技术名词保留英文  
 
-\> 目标读者：本地 Coding Agent / 面试官 / FDE / 开发者
+\> 目标读者：本地 Coding Agent / FDE / 开发者
 
 变更记录（v1.4，2026-09-06）：以当前官方 Unified Checkout/Issuing V2 文档校正主路径；保留旧版 `/v4/payment/*` 为 Legacy Contract；补充 current adapter、DTO/Mapper、fixture contract test、VCC Issuing human confirmation、并发 Observation 与 CI 验证边界。
 

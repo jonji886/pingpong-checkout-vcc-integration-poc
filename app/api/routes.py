@@ -70,6 +70,26 @@ def _clarification_question(parsed: PaymentRequest) -> str | None:
     return "请补充：" + fields + "。"
 
 
+_VCC_INTENT_MARKERS = (
+    "vcc",
+    "virtual card",
+    "corporate card",
+    "business card",
+    "虚拟卡",
+    "企业卡",
+    "用卡申请",
+    "申请一张卡",
+    "申请卡",
+    "开卡",
+)
+
+
+def _looks_like_vcc_request(message: str) -> bool:
+    """Keep unrelated finance questions out of the VCC workflow."""
+    normalized = message.lower()
+    return any(marker in normalized for marker in _VCC_INTENT_MARKERS)
+
+
 def make_router(
     payment_service: PaymentService,
     refund_service: RefundService,
@@ -305,6 +325,28 @@ def make_router(
         rows = db.query(ProviderCallLog).order_by(ProviderCallLog.created_at.desc()).limit(100).all()
         return [{"operation": x.operation, "trace_id": x.trace_id, "provider_request_id": x.provider_request_id, "http_status": x.http_status, "success": x.success, "error_type": x.error_type, "latency_ms": x.latency_ms} for x in rows]
 
+    @router.post("/admin/mock/scenario")
+    def set_mock_scenario(body: dict[str, Any], request: Request, principal: Principal = Depends(require_role("admin", "fde")), db: Session = Depends(get_db)):
+        """Change the in-process Mock Checkout behavior for failure-path demos."""
+        from ..config import settings
+
+        if settings.pingpong_mode != "mock":
+            raise HTTPException(400, "mock scenario is only available in PINGPONG_MODE=mock")
+        scenario = str(body.get("scenario") or "").upper()
+        supported = {"PENDING", "SUCCESS", "FAIL", "CLOSE", "AUTH_SUCCESS", "TIMEOUT", "429"}
+        if scenario not in supported:
+            raise HTTPException(400, "unsupported mock scenario")
+        provider = payment_service.provider
+        if not hasattr(provider, "status"):
+            raise HTTPException(400, "configured provider does not expose mock scenarios")
+        provider.status = scenario
+        if hasattr(provider, "behavior"):
+            provider.behavior = scenario if scenario in {"TIMEOUT", "429"} else ""
+        trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex
+        write_audit(db, actor_id=principal.actor_id, actor_role=principal.role, action="SET_MOCK_SCENARIO", resource_type="MockProvider", resource_id=scenario, trace_id=trace_id, outcome="APPLIED")
+        db.commit()
+        return {"scenario": scenario, "supported": sorted(supported), "trace_id": trace_id}
+
     @router.get("/admin/debug")
     def debug_search(payment_id: str | None = None, application_id: str | None = None, trace_id: str | None = None, principal: Principal = Depends(require_role("admin", "fde")), db: Session = Depends(get_db)):
         """Correlate the safe observability metadata for one FDE investigation."""
@@ -375,6 +417,17 @@ def make_router(
     def vcc_agent(body: VCCAgentRequest, request: Request, principal: Principal = Depends(require_role("finance", "admin")), db: Session = Depends(get_db)):
         if is_unsafe_request(body.message):
             parsed = unsafe_request()
+        elif not _looks_like_vcc_request(body.message):
+            parsed = PaymentRequest(vendor="", amount="", currency="", purpose="", period_days=30, missing_fields=["request"])
+            return {
+                "parsed": parsed.model_dump(),
+                "budget": None,
+                "approval": None,
+                "application_id": None,
+                "clarification_question": None,
+                "status": "OUT_OF_SCOPE",
+                "scope_message": "当前 VCC Workflow 只处理企业虚拟卡申请、预算检查、审批和 Mock 开卡。",
+            }
         else:
             try:
                 # The parser is untrusted input processing. Any LLM/network/

@@ -68,7 +68,15 @@ curl -sS -X POST http://127.0.0.1:8000/api/payments/{payment_id}/query \
 python3 scripts/simulate_webhook.py txn_{payment_id} --status SUCCESS --amount 100.00
 ```
 
-重复发送相同通知只返回成功确认，不产生第二笔 TOPUP ledger。当前公开 Checkout webhook 是 flat payment/refund event；本仓库通过显式注入的 `PingPongWebhookVerifier` 执行验签，未确认账户级验签方式时 Sandbox webhook 会 fail closed。Mock 的 `X-Mock-Signature` 只属于 deterministic test contract。
+本地 UI 的 Developer 页面还可以选择 `FAIL`、`CLOSE`、`AUTH_SUCCESS`、`TIMEOUT`、`429` 等创建场景，并对 `PENDING` 订单触发 `FAIL`、`CLOSE`、`AUTH_SUCCESS`、非法状态和无效签名 Webhook。也可以由 Admin/FDE 调用以下本地实验接口切换 Provider 行为：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/admin/mock/scenario \
+  -H 'Authorization: Bearer admin-token' -H 'Content-Type: application/json' \
+  -d '{"scenario":"TIMEOUT"}'
+```
+
+重复发送相同通知只返回成功确认，不产生第二笔 TOPUP ledger。`TIMEOUT` / `429` 表示结果未知或暂时不可用，Payment 保持 `PROCESSING`，应通过 Query / Reconciliation 恢复，不应创建新交易。当前公开 Checkout webhook 是 flat payment/refund event；本仓库通过显式注入的 `PingPongWebhookVerifier` 执行验签，未确认账户级验签方式时 Sandbox webhook 会 fail closed。Mock 的 `X-Mock-Signature` 只属于 deterministic test contract。
 
 ### 4. Inspect Payment
 

@@ -115,6 +115,37 @@ def test_vcc_requires_human_approval_and_budget_gate(client):
     assert rejected["status"] == "REJECTED_BUDGET"
 
 
+def test_vcc_out_of_scope_request_is_rejected_without_application(client):
+    response = client.post(
+        "/api/vcc/agent",
+        json={"message": "请查询我最近一笔充值订单"},
+        headers={"Authorization": "Bearer finance-token"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "OUT_OF_SCOPE"
+    assert data["application_id"] is None
+    assert data["budget"] is None
+    assert data["approval"] is None
+
+
+def test_vcc_clarification_does_not_create_until_followup_is_complete(client):
+    finance = {"Authorization": "Bearer finance-token"}
+    partial = "为 AWS 申请一张虚拟卡"
+    first = client.post("/api/vcc/agent", json={"message": partial}, headers=finance).json()
+    assert first["status"] == "NEEDS_CLARIFICATION"
+    assert first["application_id"] is None
+    assert first["budget"] is None
+
+    completed = client.post(
+        "/api/vcc/agent",
+        json={"message": partial + "\n金额 20000 USD，用于 9 月账单，有效期 30 天"},
+        headers=finance,
+    ).json()
+    assert completed["status"] == "PENDING_APPROVAL"
+    assert completed["application_id"]
+
+
 def test_vcc_issuance_rejects_missing_human_confirmation(client):
     finance = {"Authorization": "Bearer finance-token"}
     parsed = client.post(
@@ -171,6 +202,59 @@ def test_payment_fail_does_not_credit():
     assert response.status_code == 200
     assert response.json()["payment_status"] == "FAILED"
     assert local_client.get("/api/me/credits", headers={"Authorization": "Bearer dev-token"}).json()["posted_balance"] == "0.00"
+
+
+def test_mock_failure_lab_can_trigger_provider_and_webhook_failures(client):
+    admin = {"Authorization": "Bearer admin-token"}
+    developer = {"Authorization": "Bearer dev-token"}
+
+    supported = ["PENDING", "SUCCESS", "FAIL", "CLOSE", "AUTH_SUCCESS", "TIMEOUT", "429"]
+    for scenario in supported:
+        response = client.post("/api/admin/mock/scenario", json={"scenario": scenario}, headers=admin)
+        assert response.status_code == 200
+        assert response.json()["scenario"] == scenario
+    assert client.post("/api/admin/mock/scenario", json={"scenario": "NOT_A_SCENARIO"}, headers=admin).status_code == 400
+    assert client.post("/api/admin/mock/scenario", json={"scenario": "FAIL"}, headers=developer).status_code == 403
+    assert client.post("/api/admin/mock/scenario", json={"scenario": "FAIL"}, headers=admin).status_code == 200
+
+    failed = client.post(
+        "/api/topups",
+        json={"amount": "20.00", "currency": "USD"},
+        headers={**developer, "Idempotency-Key": "scenario-provider-fail"},
+    )
+    assert failed.status_code == 200
+    assert failed.json()["payment_status"] == "FAILED"
+    assert client.get("/api/me/credits", headers=developer).json()["posted_balance"] == "0.00"
+
+    assert client.post("/api/admin/mock/scenario", json={"scenario": "PENDING"}, headers=admin).status_code == 200
+    pending = client.post(
+        "/api/topups",
+        json={"amount": "21.00", "currency": "USD"},
+        headers={**developer, "Idempotency-Key": "scenario-webhook-fail"},
+    ).json()
+    payment_id = pending["payment_id"]
+    assert pending["payment_status"] == "PROCESSING"
+
+    mismatch_body = json.dumps({"partner_transaction_id": "txn_" + payment_id, "status": "SUCCESS", "amount": "22.00", "currency": "USD"}).encode()
+    assert client.post("/api/webhooks/pingpong/checkout", content=mismatch_body, headers=signed(mismatch_body)).status_code == 200
+    assert client.get("/api/payments/%s" % payment_id, headers=developer).json()["payment_status"] == "PROCESSING"
+
+    missing_amount_body = json.dumps({"partner_transaction_id": "txn_" + payment_id, "status": "SUCCESS", "currency": "USD"}).encode()
+    assert client.post("/api/webhooks/pingpong/checkout", content=missing_amount_body, headers=signed(missing_amount_body)).status_code == 200
+    assert client.get("/api/payments/%s" % payment_id, headers=developer).json()["payment_status"] == "PROCESSING"
+
+    unknown_payment_body = json.dumps({"partner_transaction_id": "txn_unknown_" + payment_id, "status": "SUCCESS", "amount": "21.00", "currency": "USD"}).encode()
+    assert client.post("/api/webhooks/pingpong/checkout", content=unknown_payment_body, headers=signed(unknown_payment_body)).status_code == 200
+    assert client.get("/api/payments/%s" % payment_id, headers=developer).json()["payment_status"] == "PROCESSING"
+
+    body = json.dumps({"partner_transaction_id": "txn_" + payment_id, "status": "FAIL", "amount": "21.00", "currency": "USD"}).encode()
+    invalid = client.post("/api/webhooks/pingpong/checkout", content=body, headers={"X-Mock-Signature": "invalid"})
+    assert invalid.status_code == 401
+    assert client.get("/api/payments/%s" % payment_id, headers=developer).json()["payment_status"] == "PROCESSING"
+
+    assert client.post("/api/webhooks/pingpong/checkout", content=body, headers=signed(body)).status_code == 200
+    assert client.get("/api/payments/%s" % payment_id, headers=developer).json()["payment_status"] == "FAILED"
+    assert client.get("/api/me/credits", headers=developer).json()["posted_balance"] == "0.00"
 
 
 def test_insufficient_credits_enters_manual_review_without_provider_call(client):

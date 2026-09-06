@@ -75,20 +75,25 @@ bash scripts/demo.sh
 启动后访问：
 
 - `/ui/demo`：Guided Demo 首页，按 AI Credits 收款或 VCC 企业支出开始体验。
-- `/ui/developer`：业务友好的充值结果、Payment History、模拟成功 Webhook、Payment Timeline。
-- `/ui/finance`：按行查看交易、主动查单和带二次确认的全额退款。
+- `/ui/developer`：业务友好的充值结果、Payment History、Provider / Webhook 失败实验、Payment Timeline。
+- `/ui/finance`：按行查看交易、主动查单、Mock 失败实验室和带二次确认的全额退款。
 - `/ui/fde`：按 Payment ID / Application ID / Trace ID 查询完整调用链和安全调试元数据。
 - `/ui/vcc`：Step Flow 展示解析、Budget、RBAC、Approval、Human Confirmation 和 Mock 开卡。
 - `/docs`：Swagger API 文档。
 
 `/ui` 会默认跳转到 `/ui/demo`。页面顶部持续标明 `Environment: MOCK`、Contract / Mock E2E 验证状态和 `Sandbox: Pending Provider Provisioning`；Mock Verified 不代表真实 Sandbox 联调。
 
+所有 UI 页面首屏均先说明当前角色、使用目的和下一步动作；“名词说明”可展开查看 Credits、Payment、VCC、Trace ID 等术语。页面文案以中文为主，关键 API / Provider 状态保留英文括注，方便新人上手后继续和接口、日志对照。
+
 ## Mock 演示流程
 
-Mock Provider 支持确定性的 `PENDING`、`SUCCESS`、`FAIL`、`TIMEOUT` 和 `429` 行为。
+Mock Provider 支持确定性的 `PENDING`、`SUCCESS`、`FAIL`、`CLOSE`、`AUTH_SUCCESS`、`TIMEOUT` 和 `429` 行为。
 
 1. 以 Developer 身份创建一笔 USD 充值订单。
-2. 在 Developer 页面点击“模拟 SUCCESS Webhook”，或使用脚本发送签名 Webhook：
+2. 在 Developer 页面选择 Provider 创建场景，可以验证创建即失败、关闭、人工复核、超时和限流。`TIMEOUT` / `429` 会保持 `PROCESSING`，提示使用主动查单，不会新建交易。
+3. 对 `PENDING` 订单，在“Webhook 测试结果”中选择 `SUCCESS`、`FAIL`、`CLOSE`、`AUTH_SUCCESS` 或非法状态；也可以点击“验签失败测试”，确认无效签名不会推进订单状态。
+
+   也可以使用脚本发送签名 Webhook：
 
    ```bash
    python3 scripts/simulate_webhook.py "txn_${PAYMENT_ID}" --status SUCCESS --amount 100.00
@@ -96,9 +101,9 @@ Mock Provider 支持确定性的 `PENDING`、`SUCCESS`、`FAIL`、`TIMEOUT` 和 
 
    将 `PAYMENT_ID` 替换为创建订单返回的 Payment ID。
 
-3. 查看 Payment 状态和 Credits 余额，重复发送同一 Webhook 验证幂等。
-4. 在 Finance 页面发起退款，观察 Credit Hold、退款状态和余额变化。
-5. 使用 FDE 页面或 `scripts/reconcile_due.py` 验证主动查单和丢失 Webhook 恢复。
+4. 查看 Payment 状态和 Credits 余额，重复发送同一 Webhook 验证幂等；失败、关闭和人工复核均不入账 Credits。
+5. 在 Finance 页面切换 Mock Provider 场景后发起退款，观察退款失败、未知结果、Credit Hold 释放 / 保留。
+6. 使用 FDE 页面或 `scripts/reconcile_due.py` 验证主动查单和丢失 Webhook 恢复。
 
 ## 本地演示身份
 
