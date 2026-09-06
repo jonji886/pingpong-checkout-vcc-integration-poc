@@ -24,7 +24,7 @@
 | CON-04 | Unknown action safety | HIGH | action 未定义字段 | map response | 不猜字段，安全为 NONE | `test_mapper_keeps_unknown_action_safe` | PASS |
 | CON-05 | Current unified Checkout | HIGH | 官方 V4 `{code,data}` fixture | Session/Query/Refund serialization + mapping | 使用 `/api/acq/v4/...`，Session 不伪装成 SUCCESS | `test_current_checkout_session_query_and_refund_contract` | PASS |
 | CON-06 | Current Issuing v2 | HIGH | 官方 v2 fixture | Create/Detail/Action/Transaction mapping | 请求字段准确；PAN/CVC 不穿越 domain port | `test_current_issuing_contract_serialization_parsing_and_redaction` | PASS |
-| SEC-01 | RBAC | HIGH | Developer principal | 访问 Admin | 403 | `test_rbac_and_bad_signature`, `test_idempotency_conflict_and_rbac_are_enforced` | PASS |
+| SEC-01 | RBAC | HIGH | Developer principal | 访问 Admin 或 VCC 申请 | 403 | `test_rbac_and_bad_signature`, `test_idempotency_conflict_and_rbac_are_enforced`, `test_vcc_requires_approval_before_card_creation` | PASS |
 | SEC-02 | Sensitive redaction | HIGH | sensitive keys/action URL | redact snapshot | Secret/PAN/CVV/PII 不出现在日志副本 | `test_redactor_removes_sensitive_fields`, `test_sensitive_redaction_includes_provider_action_and_auth_fields` | PASS |
 | VCC-01 | Approval boundary | HIGH | Finance request > threshold | Finance 直接开卡，再 Approver approve | 未审批 403；审批后 Mock card ACTIVE | `test_vcc_requires_human_approval_and_budget_gate`, `test_vcc_requires_approval_before_card_creation` | PASS |
 | VCC-02 | Budget rejection / parser | MEDIUM | over-budget/缺金额 | parse + policy | REJECTED_BUDGET；缺失字段不猜 | `test_agent_does_not_treat_month_as_amount`, `test_vcc_requires_human_approval_and_budget_gate` | PASS |

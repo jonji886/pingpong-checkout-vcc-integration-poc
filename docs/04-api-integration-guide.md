@@ -34,6 +34,8 @@ PINGPONG_MODE=mock PINGPONG_WEBHOOK_SECRET=local-demo-secret python3 -m uvicorn 
 | Approver | `approver-token` | VCC 审批 |
 | Admin/FDE | `admin-token` / `fde-token` | Debug、Webhook、对账 |
 
+`GET /api/vcc/{application_id}` 只允许 Finance、Approver、Admin/FDE；普通 Developer 访问企业 VCC 申请会返回 `403`。Finance 只能读取本人提交的申请，Approver 用于独立审核申请。
+
 这套 token 不是 PingPong Provider Auth。当前统一 API 使用 `Authorization`、`sign`、`sign-version`；签名由 infrastructure signer 注入 Adapter，不能根据其他平台猜 canonicalization。Secret 不进入业务服务、日志或前端。
 
 ## Integration Flow

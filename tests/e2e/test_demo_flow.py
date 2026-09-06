@@ -107,6 +107,8 @@ def test_vcc_requires_approval_before_card_creation(e2e_client):
     assert data["budget"]["passed"] is True
     assert data["approval"]["required"] is True
     application_id = data["application_id"]
+    assert client.get("/api/vcc/" + application_id, headers=auth("developer")).status_code == 403
+    assert client.post("/api/vcc/" + application_id + "/approve", json={"approved": True}, headers=finance).status_code == 403
     assert client.post("/api/vcc/" + application_id + "/card", headers=finance).status_code == 403
     approved = client.post("/api/vcc/" + application_id + "/approve", json={"approved": True}, headers=auth("approver"))
     assert approved.status_code == 200

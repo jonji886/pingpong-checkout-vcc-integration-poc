@@ -462,11 +462,11 @@ def make_router(
         return {"application_id": app.id, "status": app.status, "provider_card_id": app.provider_card_id, "masked_card": app.masked_card}
 
     @router.get("/vcc/{application_id}")
-    def get_vcc(application_id: str, principal: Principal = Depends(current_principal), db: Session = Depends(get_db)):
+    def get_vcc(application_id: str, principal: Principal = Depends(require_role("finance", "approver", "admin", "fde")), db: Session = Depends(get_db)):
         app = db.get(VCCApplication, application_id)
         if not app: raise HTTPException(404, "application not found")
         if principal.role == "finance" and app.requester_id != principal.actor_id: raise HTTPException(404, "application not found")
-        return {"application_id": app.id, "vendor": app.vendor, "purpose": app.purpose, "amount": str(app.amount), "currency": app.currency, "period_days": app.period, "status": app.status, "approval_status": app.approval_status, "provider_card_id": app.provider_card_id, "masked_card": app.masked_card}
+        return {"application_id": app.id, "requester_id": app.requester_id, "requester_role": "finance", "vendor": app.vendor, "purpose": app.purpose, "amount": str(app.amount), "currency": app.currency, "period_days": app.period, "status": app.status, "approval_status": app.approval_status, "provider_card_id": app.provider_card_id, "masked_card": app.masked_card}
 
     @router.get("/admin/audit")
     def audit(principal: Principal = Depends(require_role("admin", "fde")), db: Session = Depends(get_db)):

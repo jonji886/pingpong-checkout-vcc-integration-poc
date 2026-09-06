@@ -9,7 +9,7 @@ flowchart LR
     User[Developer / Finance] --> API[FastAPI API]
     API --> App[Application Services]
     App --> Mock[Mock Checkout]
-    App --> PP[PingPong Checkout V4 Adapter]
+    App --> PP[PingPong Unified Checkout Adapter]
     PP --> Webhook[Webhook Endpoint]
     Webhook --> App
     App --> DB[(SQLite / local transaction)]
@@ -110,6 +110,8 @@ sequenceDiagram
 ```
 
 ## VCC Workflow（当前 P1 Mock）
+
+Finance 是 Requester，只提交申请；Approver 通过独立权限执行批准/拒绝；审批通过后，Finance / Authorized Operator 才能完成最终 Human Confirmation。UI 的 Persona 切换只服务于演示，不能改变后端 Principal 或绕过 RBAC。
 
 ```mermaid
 sequenceDiagram

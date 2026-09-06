@@ -19,6 +19,7 @@ dev = ["ruff>=0.6", "mypy>=1.11"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 markers = ["e2e: black-box HTTP acceptance tests using the deterministic Mock Provider"]
 
 [tool.ruff]
