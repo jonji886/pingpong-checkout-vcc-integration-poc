@@ -15,6 +15,12 @@
 - Trace ID 串联 API、Provider、Webhook、Ledger 和 Audit，支持 FDE 排障。
 - 当前证据为 `Contract Verified` + `Mock E2E Verified`；真实 PingPong Sandbox 保持 `Sandbox Pending`。
 
+## 架构与核心流程总览
+
+![跨境支付 API 集成 POC：整体架构与核心流程](docs/assets/image.png)
+
+这张架构示意图概览两条业务主线、统一 Payment 状态机、Create / Webhook / Query 三类可信 Observation、幂等与异常恢复，以及 VCC 的 Budget / Policy / RBAC / Approval / Human Confirmation 链路。图中的支付和发卡 Provider 当前均以本地 Mock 为主，真实 PingPong Sandbox 仍为 `Sandbox Pending`。
+
 ## 两条核心业务链路
 
 ### Developer Credits 收款
